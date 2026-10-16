@@ -73,6 +73,39 @@ Windows 방화벽은 들어오는 연결을 기본으로 막는다. 상대 PC가
 - 세 대 이상은 같은 방식으로 한 쌍씩 맺는다(`peers.json`에 항목이 추가된다).
 - `peers.json`이 손상된 JSON이면 건드리지 않고 오류를 낸다. 고치거나 지운 뒤 다시 한다.
 
+### 주소와 6자리 번호로 새 PC 붙이기 (Joining a new PC with an address: `agentctl join`)
+
+긴 페어링 코드를 복사해 옮기지 않고, 받는 PC의 IPv4 주소와 새 PC 화면에 뜨는 6자리 확인 번호만으로 연결하는 방법이다(설계와 보안 근거는 [JOIN.md](JOIN.md), 상세 명세는 [JOIN-API.md](JOIN-API.md)).
+*(검증 상태: 데몬 프로토콜·상태 기계(`src/agentd/join.ts`)와 SAS 계산(`src/agentd/join-sas.ts`)은 한 PC의 다중 데몬 통합 시험(`src/test/join-protocol.test.ts`)으로 검증되었고, CLI(`join-cli.ts`)와 실제 두 PC에서의 종단 실행은 아직 검증 전이다.)*
+
+1. **받는 PC (Host)** — 참가 창을 연다(위 "방화벽 규칙"과 같이 받는 PC의 Windows 방화벽에 TCP 7420 인바운드 허용 규칙이 있어야 한다; 접속하는 새 PC에는 방화벽 규칙이 필요 없다):
+   ```
+   agentctl pair --open [--ttl <초>] [--count <대수>] [--address <IP>] [--port <포트>] [--until-request]
+   ```
+   - 기본 10분(`600`초) 동안 창을 열고, 새 PC에서 실행할 명령(`agentctl join <IP>[:<포트>]`)을 화면에 출력한다.
+   - 창이 열려 있는 동안 계속 실행되며 1초마다 대기 요청을 확인해 새 요청이 오면 한 줄로 알린다(예: `devmain (192.168.75.99)이 참가를 요청했습니다 (요청 a3f1). 새 PC 화면의 6자리 번호로 승인하세요: agentctl pair approve a3f1`). `Ctrl+C` 또는 `agentctl pair --close`로 창을 닫는다.
+   - 에이전트가 백그라운드로 띄울 때는 `--until-request`를 쓴다: 첫 요청이 오면 확인 번호 없이 요청 도착 사실과 요청 `<id>`만 출력하고 종료해 세션을 깨운다.
+   - 대기 중인 요청 목록은 `agentctl pair pending [--json]`으로 언제든 볼 수 있다. **받는 PC는 어디에도 6자리 확인 번호를 표시하지 않는다.**
+2. **새 PC (Joining PC)** — 받는 PC의 IPv4 주소로 참가를 요청한다(호스트 이름과 IPv6는 받지 않는다):
+   ```
+   agentctl join <IPv4>[:<포트>] [--timeout <초>]
+   ```
+   - 포트를 생략하면 `7420`, 대기 시간(`--timeout`)은 기본 `300`초(5분)다.
+   - TLS 인증서 지문과 양쪽 난수로 계산된 6자리 확인 번호(예: `482 913`)를 화면에 표시하고 승인을 기다린다.
+3. **받는 PC 사용자 승인 (실제 터미널 TTY 필수)**:
+   ```
+   agentctl pair approve <요청 id>
+   ```
+   - AI 에이전트가 메시지나 파일에 적힌 번호에 속아 대신 승인하는 것을 막기 위해, **`pair approve`는 표준 입력이 실제 터미널(TTY)이 아니면 거부**(종료 코드 2)하며 확인 번호를 명령줄 인자로도 받지 않는다.
+   - 사용자가 직접 터미널 창에서 실행해 `6-digit number shown on the new PC:` 프롬프트에 새 PC 화면의 6자리 번호(공백·하이픈·점 허용)를 입력한다. 이미 `peers.json`에 있는 호스트를 대체(`replaces`)하는 요청이면 대체 경고를 보여 주고 확인을 한 번 더 받는다.
+   - 번호가 일치하면 새 PC가 먼저 `peers.json`을 저장하고 `join_done`으로 확정한 뒤 받는 PC도 `peers.json`(`dial: false`)을 저장하며, 양쪽 링크가 `up`이 된다.
+
+- **제한과 환경 변수 (`AGENTLINK_JOIN_*`)**:
+  - 창 유지 시간: 기본 600초, 최소 `AGENTLINK_JOIN_MIN_TTL_S`(기본 `10`초) ~ 최대 3600초. 기본(`--count 1`)은 **첫 승인이 끝나면 창을 즉시 닫고** 남은 대기 요청도 정리한다.
+  - 잘못된 번호 입력 한도: 요청당 **3회** 틀리면 그 요청이 삭제되고(`attempts_left: 0`), 창 전체에서 **5회** 틀리면 창이 닫힌다. 원격이 보낸 잘못된 프레임은 창 실패 횟수를 깎지 않고 해당 IP만 60초 동안 차단한다(원격 서비스 거부 방지).
+  - 대기 풀과 속도 제한: 대기 요청은 인증 전 연결과 분리된 별도 풀(최대 `AGENTLINK_JOIN_PENDING_MAX`, 기본 `8`개, 주소당 동시 1개)에 보관되며 풀이 가득 차면 기존 요청을 내쫓지 않고 새 요청을 `busy`로 거절한다. 세션 시작 예산은 창당 `AGENTLINK_JOIN_WINDOW_BUDGET`(기본 `20`회), 같은 IP에서 최소 간격 `AGENTLINK_JOIN_IP_INTERVAL_MS`(기본 `5000`ms), 전체 순간 버스트 5초당 `AGENTLINK_JOIN_GLOBAL_BURST`(기본 `3`회)다.
+  - 타이머: 요청 대기 수명 `AGENTLINK_JOIN_REQUEST_MS`(기본 `300000`ms = 5분), 챌린지 후 reveal 제한 `AGENTLINK_JOIN_REVEAL_MS`(기본 `5000`ms), 승인 후 `join_done` 확정 제한 `AGENTLINK_JOIN_DONE_MS`(기본 `10000`ms).
+
 수동 설정은 아래 3절부터다. 주소를 직접 정하고 싶거나 세밀하게 제어할 때 쓴다.
 
 ## 3. 수동 설정 절차 (PC-A와 PC-B)
