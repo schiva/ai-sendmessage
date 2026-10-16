@@ -173,29 +173,58 @@ var Client = class _Client extends EventEmitter {
   }
 };
 
+// src/agentd/acl-init.ts
+import fs2 from "node:fs";
+import path3 from "node:path";
+function aclStarter(selfHost, peerHosts) {
+  const rules = [{ from: `*@${selfHost}`, to: `*@${selfHost}`, action: "allow" }];
+  for (const host of [...new Set(peerHosts)].filter((h) => h !== selfHost).sort()) {
+    rules.push({ from: `*@${host}`, to: `*@${selfHost}`, action: "allow" });
+    rules.push({ from: `*@${selfHost}`, to: `*@${host}`, action: "allow" });
+  }
+  return { default: "deny", rules };
+}
+function aclFile(home) {
+  return path3.join(home, "acl.json");
+}
+function writeAclStarter(home, starter, force) {
+  const file = aclFile(home);
+  let backup = null;
+  if (fs2.existsSync(file)) {
+    if (!force) throw Object.assign(new Error(`${file} already exists`), { code: "EEXIST" });
+    backup = `${file}.bak`;
+    fs2.copyFileSync(file, backup);
+  }
+  fs2.mkdirSync(home, { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs2.writeFileSync(tmp, JSON.stringify(starter, null, 2) + "\n");
+  fs2.renameSync(tmp, file);
+  return { file, backup };
+}
+
 // src/version.ts
-var VERSION = true ? "0.3.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.4.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function versionMismatchNote(daemonVersion, ownVersion = VERSION) {
   if (daemonVersion === ownVersion) return null;
   return `the running AgentLink daemon is version ${daemonVersion} but this installation is ${ownVersion}. Run "agentctl stop" to replace it; the next command starts the new one. End idle watchers (agentctl wake) of version 0.2.0 or older first, they would restart the old daemon.`;
 }
 
 // src/client/wake.ts
-import fs3 from "node:fs";
-import path3 from "node:path";
+import fs4 from "node:fs";
+import path4 from "node:path";
 import { execFile, spawnSync } from "node:child_process";
 
 // src/client/atomic-file.ts
-import fs2 from "node:fs";
+import fs3 from "node:fs";
 import { randomBytes } from "node:crypto";
 var sleepSync = (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 function writeFileAtomic(file, data) {
   const tmp = `${file}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
   try {
-    fs2.writeFileSync(tmp, data);
+    fs3.writeFileSync(tmp, data);
     for (let attempt = 0; ; attempt++) {
       try {
-        fs2.renameSync(tmp, file);
+        fs3.renameSync(tmp, file);
         return;
       } catch (e) {
         const code = e.code;
@@ -204,10 +233,10 @@ function writeFileAtomic(file, data) {
         sleepSync(3);
       }
     }
-    fs2.writeFileSync(file, data);
+    fs3.writeFileSync(file, data);
   } finally {
     try {
-      fs2.rmSync(tmp, { force: true });
+      fs3.rmSync(tmp, { force: true });
     } catch {
     }
   }
@@ -216,7 +245,7 @@ function readJsonStable(file, attempts = 6) {
   for (let i = 0; i < attempts; i++) {
     let text;
     try {
-      text = fs2.readFileSync(file, "utf8");
+      text = fs3.readFileSync(file, "utf8");
     } catch (e) {
       if (e.code === "ENOENT") return null;
       sleepSync(5);
@@ -234,15 +263,15 @@ function readJsonStable(file, attempts = 6) {
 // src/client/wake.ts
 var WAKE_KINDS = /* @__PURE__ */ new Set(["message", "idle_notice"]);
 function stateFile(agent) {
-  return path3.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.json`);
+  return path4.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.json`);
 }
 function stopFile(agent) {
-  return path3.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.stop`);
+  return path4.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.stop`);
 }
-var stopRequested = (agent) => fs3.existsSync(stopFile(agent));
+var stopRequested = (agent) => fs4.existsSync(stopFile(agent));
 function clearStopRequest(agent) {
   try {
-    fs3.rmSync(stopFile(agent), { force: true });
+    fs4.rmSync(stopFile(agent), { force: true });
   } catch {
   }
 }
@@ -253,7 +282,7 @@ function readState(agent) {
 }
 function writeState(agent, s) {
   try {
-    fs3.mkdirSync(path3.dirname(stateFile(agent)), { recursive: true });
+    fs4.mkdirSync(path4.dirname(stateFile(agent)), { recursive: true });
     writeFileAtomic(stateFile(agent), JSON.stringify(s));
   } catch {
   }
@@ -347,7 +376,7 @@ async function waitForWake(connect, o) {
 }
 function watcherAgents() {
   try {
-    return fs3.readdirSync(path3.join(homeDir(), "hook-state")).map((f) => /^(.+)\.wake\.json$/.exec(f)?.[1]).filter((a) => typeof a === "string");
+    return fs4.readdirSync(path4.join(homeDir(), "hook-state")).map((f) => /^(.+)\.wake\.json$/.exec(f)?.[1]).filter((a) => typeof a === "string");
   } catch {
     return [];
   }
@@ -382,7 +411,7 @@ async function stopOne(a, graceMs) {
     return { agent: a, pid: st.pid, how: "not-running" };
   }
   try {
-    fs3.writeFileSync(stopFile(a), "");
+    fs4.writeFileSync(stopFile(a), "");
   } catch {
   }
   writeState(a, { ...st, stop: true });
@@ -436,6 +465,8 @@ Commands:
   ping               start agentd if needed and print its info
   acl [reload]       show the ACL (who may send to whom); reload re-reads acl.json
   acl check <from> <to>  ask whether name@host may send to name@host
+  acl init [--force] [--print]  write a starting acl.json: default deny, allow this PC and the hosts of peers.json
+                     (--print only shows it; an existing acl.json is replaced only with --force, a backup is kept)
   peers [reload]     show LAN links, the certificate fingerprint of this host, and re-read peers.json
   pair               connect two PCs: prints a one-time code (valid 10 minutes), then waits for the other PC
   pair <code>        on the other PC: join with that code; both PCs then know each other
@@ -470,6 +501,8 @@ var { values, positionals } = parseArgs({
     state: { type: "string" },
     peek: { type: "boolean" },
     stop: { type: "boolean" },
+    force: { type: "boolean" },
+    print: { type: "boolean" },
     local: { type: "boolean" },
     address: { type: "string" },
     port: { type: "string" },
@@ -510,6 +543,34 @@ async function main() {
     return;
   }
   if (command === "acl") {
+    if (rest[0] === "init") {
+      const known = await client.request("peers");
+      const starter = aclStarter(client.hello.host, (known.peers ?? []).map((h) => h.host));
+      if (values.print) {
+        out(starter, JSON.stringify(starter, null, 2));
+        client.close();
+        return;
+      }
+      let written;
+      try {
+        written = writeAclStarter(homeDir(), starter, values.force === true);
+      } catch (e) {
+        if (e.code === "EEXIST") fail(1, `${e.message}. Use --print to see the starter, or --force to replace it (the old file is kept as acl.json.bak).`);
+        throw e;
+      }
+      await client.request("reload_acl");
+      const hosts = starter.rules.filter((r2) => r2.from.endsWith(`@${client.hello.host}`) && !r2.to.endsWith(`@${client.hello.host}`)).map((r2) => r2.to.slice(2));
+      out(
+        { file: written.file, backup: written.backup, hosts },
+        [
+          `Wrote ${written.file}${written.backup ? ` (the old file is now ${written.backup})` : ""} and reloaded it.`,
+          `Default: deny. Allowed: the agents of this PC with each other${hosts.length > 0 ? `, and with the agents of ${hosts.join(", ")} in both directions` : ""}.`,
+          'A PC you pair later is not allowed until you add rules for it (run "agentctl acl init --force" again, or edit acl.json and run "agentctl acl reload").'
+        ].join("\n")
+      );
+      client.close();
+      return;
+    }
     if (rest[0] === "check") {
       if (!rest[1] || !rest[2]) fail(2, "usage: agentctl acl check <from name@host> <to name@host>");
       const r2 = await client.request("acl_check", { from: rest[1], to: rest[2] });

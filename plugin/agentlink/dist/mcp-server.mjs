@@ -17292,7 +17292,7 @@ var Session = class {
 };
 
 // src/version.ts
-var VERSION = true ? "0.3.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.4.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 // src/adapters/mcp/server.ts
 var identity = deriveIdentity(process.env, process.cwd());

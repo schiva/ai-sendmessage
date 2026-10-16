@@ -117,6 +117,25 @@ starts the daemon and prints its host name.
 
 ## 6. Update
 
+The installer script does the update in two steps, because it cannot run `/reload-plugins` for you (use the clone, or the downloaded
+`install-agentlink.mjs` of step 2):
+
+```
+node scripts/install.mjs --update --yes          # step 1: refresh the marketplace, update the plugin, end the idle watchers
+# in every open Claude Code session: /reload-plugins
+node scripts/install.mjs --finish-update --yes   # step 2: stop the old daemon and check that the new one is the installed version
+```
+
+- Without `--yes` each step only prints its plan and changes nothing (exit code 3). `--dry-run` does the same with exit code 0, and
+  `--json` gives the result as JSON (`mode`, `version_before`, `version_after`, `pending[]`, and for step 2 the daemon version).
+- If the version did not change, step 1 touches no watcher and says that you are up to date.
+- Step 2 fails with a reason when a session that was not reloaded keeps bringing the old daemon back; reload or end those sessions
+  and run step 2 again.
+- The script reads the state of Claude Code as JSON (`claude plugin list --json`). If that output cannot be understood it stops
+  with exit code 1 and "Nothing was changed" instead of guessing.
+
+### By hand
+
 ```
 claude plugin marketplace update agentlink-marketplace
 claude plugin update agentlink@agentlink-marketplace

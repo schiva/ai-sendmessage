@@ -22870,7 +22870,13 @@ function loadConfig() {
     listenRetryMs: num("AGENTLINK_LISTEN_RETRY_MS", 15e3),
     retryBaseMs: num("AGENTLINK_RETRY_BASE_MS", 2e3),
     retryMaxAttempts: num("AGENTLINK_RETRY_MAX_ATTEMPTS", 8),
-    shareFullCwd: process.env.AGENTLINK_SHARE_FULL_CWD === "1"
+    shareFullCwd: process.env.AGENTLINK_SHARE_FULL_CWD === "1",
+    pairMinTtlS: num("AGENTLINK_PAIR_MIN_TTL_S", 10),
+    outboxMaxMessages: num("AGENTLINK_OUTBOX_MAX", 500),
+    outboxMaxBytes: num("AGENTLINK_OUTBOX_MAX_BYTES", 16 * 1024 * 1024),
+    directoryKeepaliveMs: num("AGENTLINK_DIRECTORY_KEEPALIVE_MS", 3e4),
+    maxPreAuth: num("AGENTLINK_MAX_PREAUTH", 32),
+    maxPreAuthPerIp: num("AGENTLINK_MAX_PREAUTH_PER_IP", 4)
   };
 }
 
@@ -22906,7 +22912,7 @@ var ApiError = class extends Error {
 };
 
 // src/version.ts
-var VERSION = true ? "0.3.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.4.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 // src/agentd/core.ts
 function folderName(path6) {
@@ -23706,6 +23712,7 @@ var PeerManager = class {
   listenRetryAt = null;
   lastListenFailure = "";
   stopped = false;
+  unauthenticated = [];
   constructor(opts) {
     this.core = opts.core;
     this.store = opts.store;
@@ -23735,6 +23742,15 @@ var PeerManager = class {
     });
   }
   async send(host, frame, senderAgent, toDisplay) {
+    if (frame.t === "msg") {
+      const { count, bytes } = this.store.outboxUsage(host);
+      if (count >= this.cfg.outboxMaxMessages || bytes + JSON.stringify(frame).length > this.cfg.outboxMaxBytes) {
+        throw new ApiError(
+          "RATE_LIMITED",
+          `${count} message${count === 1 ? " is" : "s are"} already waiting for ${host} (${Math.ceil(bytes / 1024)} KiB), the limit is ${this.cfg.outboxMaxMessages} messages or ${Math.round(this.cfg.outboxMaxBytes / 1024 / 1024)} MiB; ${host} has not been reachable. Try again when the link is up.`
+        );
+      }
+    }
     this.store.insertOutbox({
       id: frame.id,
       peer: host,
@@ -23845,7 +23861,7 @@ var PeerManager = class {
     let address = opts.address;
     if (!address) address = l && !isWildcard(l.host) && l.host !== "127.0.0.1" ? l.host : lanAddresses()[0];
     if (!address) throw new ApiError("BAD_REQUEST", "no LAN address of this PC found; pass --address <IP of this PC>");
-    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, 10), 3600);
+    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, this.cfg.pairMinTtlS), 3600);
     if (this.pairing) {
       clearTimeout(this.pairing.timer);
       this.pairing.state = "cancelled";
@@ -23975,7 +23991,11 @@ var PeerManager = class {
           (e) => finish(new ApiError("INTERNAL", String(e)))
         );
       });
-      ws.on("error", (e) => finish(new ApiError("INTERNAL", `cannot reach ${c.address}:${c.port}: ${e.message}. Is TCP ${c.port} open in the firewall of that PC?`)));
+      ws.on("error", (e) => {
+        const code = e.code;
+        const hint = code === "ECONNREFUSED" ? `nothing is waiting for a pairing there: the code has probably expired or was cancelled. Run "agentctl pair" again on that PC.` : `Is TCP ${c.port} allowed in the Windows Firewall of that PC (see docs/LAN.md, "Firewall rule"), and is ${c.address} the right address?`;
+        finish(new ApiError("INTERNAL", `cannot reach ${c.address}:${c.port}: ${e.message}. ${hint}`));
+      });
       ws.on("close", () => finish(new ApiError("INTERNAL", "the other PC closed the connection before pairing finished")));
     });
   }
@@ -23984,7 +24004,10 @@ var PeerManager = class {
     return new Promise((resolve) => {
       const server2 = https.createServer({ key: this.tls.key, cert: this.tls.cert, minVersion: "TLSv1.2" });
       const wss = new import_websocket_server.default({ server: server2, maxPayload: MAX_FRAME });
-      wss.on("connection", (ws) => this.bind(ws, "peer", null));
+      wss.on("connection", (ws, req) => {
+        this.admitUnauthenticated(ws, req.socket.remoteAddress ?? "");
+        this.bind(ws, "peer", null, () => this.forgetUnauthenticated(ws));
+      });
       wss.on("error", () => {
       });
       server2.once("error", (e) => {
@@ -24024,6 +24047,25 @@ var PeerManager = class {
       void this.startListener(want).then(() => this.scheduleListenRetry());
     }, this.cfg.listenRetryMs);
     this.listenRetry.unref();
+  }
+  /**
+   * Connections that have not said who they are yet are limited, so that idle sockets cannot use up the daemon: when the limit for
+   * one address (or the overall limit) is reached, the oldest of them is closed to make room. A peer that connects now is never turned
+   * away, and whoever opens many sockets only closes its own.
+   */
+  admitUnauthenticated(ws, ip) {
+    const drop = (entry) => {
+      this.unauthenticated = this.unauthenticated.filter((e) => e !== entry);
+      entry.ws.terminate();
+    };
+    const sameIp = this.unauthenticated.filter((e) => e.ip === ip);
+    if (sameIp.length >= this.cfg.maxPreAuthPerIp) drop(sameIp[0]);
+    if (this.unauthenticated.length >= this.cfg.maxPreAuth) drop(this.unauthenticated[0]);
+    this.unauthenticated.push({ ws, ip });
+    ws.once("close", () => this.forgetUnauthenticated(ws));
+  }
+  forgetUnauthenticated(ws) {
+    this.unauthenticated = this.unauthenticated.filter((e) => e.ws !== ws);
   }
   stopListener() {
     const server2 = this.httpsServer;
@@ -24186,6 +24228,8 @@ var PeerManager = class {
       since: Date.now(),
       alive: true,
       agents: [],
+      lastDirectory: "",
+      lastDirectoryAt: 0,
       pingTimer: setInterval(() => {
         if (!link.alive) {
           ws.terminate();
@@ -24216,9 +24260,16 @@ var PeerManager = class {
     }
   }
   // --- frames ------------------------------------------------------------------------------------------
+  /** Sends the list of local agents unless this peer already has it: it goes out when it changed and at least every directoryKeepaliveMs. */
   sendDirectory(link) {
+    const agents = this.core.localDirectory();
+    const signature = JSON.stringify(agents.map((a) => ({ ...a, last_seen: 0 })));
+    const now = Date.now();
+    if (signature === link.lastDirectory && now - link.lastDirectoryAt < this.cfg.directoryKeepaliveMs) return;
+    link.lastDirectory = signature;
+    link.lastDirectoryAt = now;
     try {
-      link.ws.send(JSON.stringify({ t: "agents", agents: this.core.localDirectory() }));
+      link.ws.send(JSON.stringify({ t: "agents", agents }));
     } catch {
     }
   }
@@ -24662,6 +24713,8 @@ function plain(row) {
 }
 var Store = class {
   db;
+  /** Set when opening this database changed its schema, so that the daemon can say so in its log. */
+  upgrade = null;
   constructor(file) {
     this.db = new DatabaseSync(file);
     this.db.exec("PRAGMA journal_mode = WAL");
@@ -24677,13 +24730,16 @@ var Store = class {
   migrate() {
     const version = () => Number(this.db.prepare("PRAGMA user_version").get().user_version);
     let v = version();
+    let before = v;
     if (v > SCHEMA_VERSION) {
       throw new Error(`the database has schema version ${v} but this daemon only knows up to ${SCHEMA_VERSION}: it was written by a newer AgentLink, update before using it`);
     }
     if (v === 0) {
+      const existed = this.db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'agents'").get() !== void 0;
       this.db.exec(BASE_SCHEMA);
       this.db.exec("PRAGMA user_version = 1");
       v = 1;
+      before = existed ? 1 : null;
     }
     for (; v < SCHEMA_VERSION; v++) {
       this.db.exec("BEGIN");
@@ -24696,6 +24752,7 @@ var Store = class {
         throw e;
       }
     }
+    if (before !== null && v > before) this.upgrade = { from: before, to: v };
   }
   close() {
     this.db.close();
@@ -24795,6 +24852,11 @@ var Store = class {
   outboxForPeer(peer) {
     return this.db.prepare("SELECT * FROM outbox WHERE peer=? ORDER BY created_ms, id").all(peer).map((r) => plain(r));
   }
+  /** How many messages wait for this peer and how many bytes their frames take. */
+  outboxUsage(peer) {
+    const r = this.db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(frame)), 0) AS b FROM outbox WHERE peer=?").get(peer);
+    return { count: Number(r.n), bytes: Number(r.b) };
+  }
   countOutbox(peer) {
     const r = this.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE peer=?").get(peer);
     return Number(r.n);
@@ -24862,6 +24924,7 @@ var server = await (async () => {
     log(`cannot open the database: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
+  if (store.upgrade) log(`database upgraded from schema ${store.upgrade.from} to ${store.upgrade.to}`);
   const host = hostName();
   const core = new Core(store, host, cfg);
   const acl = new Acl(home, host);
