@@ -135,6 +135,7 @@ async function main(): Promise<void> {
       fingerprint?: string
       listening?: { host: string; port: number } | null
       listen_error?: string | null
+      listen_retry_s?: number | null
       config_errors?: string[]
       peers?: Array<{ host: string; link: string; since: number | null; queued: number; error: string | null }>
       starting?: boolean
@@ -142,7 +143,7 @@ async function main(): Promise<void> {
     const lines = [
       `host:        ${r.host ?? client.hello.host}`,
       `fingerprint: ${r.fingerprint ?? '(starting)'}`,
-      `listening:   ${r.listening ? `${r.listening.host}:${r.listening.port}` : 'no'}${r.listen_error ? ` (error: ${r.listen_error})` : ''}`,
+      `listening:   ${r.listening ? `${r.listening.host}:${r.listening.port}` : 'no'}${r.listen_error ? ` (error: ${r.listen_error}${r.listen_retry_s != null ? `; trying again in ${r.listen_retry_s}s` : ''})` : ''}`,
       ...(r.config_errors ?? []).map(e => `config error: ${e}`),
       ...((r.peers ?? []).length === 0 ? ['peers:       (none configured; add peers.json to the AgentLink data folder)'] : (r.peers ?? []).map(p => `peer ${p.host.padEnd(16)} ${p.link.padEnd(5)} queued=${p.queued}${p.error ? `  last error: ${p.error}` : ''}`)),
     ]

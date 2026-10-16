@@ -95,3 +95,58 @@ test('a line without a newline gets one', () => {
   appendLog(file, 'two\n')
   assert.equal(fs.readFileSync(file, 'utf8'), 'one\ntwo\n')
 })
+
+// --- D1: a LAN port that could not be opened is tried again ----------------------------------------
+
+import net from 'node:net'
+import type { Client } from '../client/client.ts'
+import { TOKEN, cleanup as lanCleanup, makeNode, start, status, stop, until, writePeers } from './lan-harness.ts'
+
+const A = await makeNode('pc-rel-a', { AGENTLINK_LISTEN_RETRY_MS: '200' })
+
+after(async () => {
+  await stop(A)
+  lanCleanup()
+})
+
+const peersStatus = async () => (await status(A)) as unknown as { listening: unknown; listen_error: string | null; listen_retry_s: number | null }
+const reload = async () => void (await (A.client as Client).request('reload_peers'))
+const failures = () => (fs.readFileSync(path.join(A.home, 'agentd.log'), 'utf8').match(/listener .* failed/g) ?? []).length
+
+test('a busy LAN port is opened as soon as it is free, without a reload, and a repeated failure is logged once', async () => {
+  const blocker = net.createServer()
+  await new Promise<void>(resolve => blocker.listen(A.port, '127.0.0.1', resolve))
+  await start(A)
+  writePeers(A, { listen: { host: '127.0.0.1', port: A.port }, peers: [{ name: 'pc-rel-b', token: TOKEN, dial: false }] })
+  await reload()
+
+  const before = await peersStatus()
+  assert.equal(before.listening, null)
+  assert.match(String(before.listen_error), /EADDRINUSE/)
+  assert.equal(typeof before.listen_retry_s, 'number', 'the status says it will try again')
+
+  await new Promise(r => setTimeout(r, 900)) // several retries at 200 ms
+  assert.equal(failures(), 1, 'the same failure is written to the log once, not at every retry')
+
+  await new Promise<void>(resolve => blocker.close(() => resolve()))
+  await until(async () => (await peersStatus()).listening !== null, 5000, 'the listener to open once the port is free')
+  const after = await peersStatus()
+  assert.equal(after.listen_error, null)
+  assert.equal(after.listen_retry_s, null, 'nothing left to retry')
+})
+
+test('removing the LAN configuration stops the retries', async () => {
+  const blocker = net.createServer()
+  // The listener of the previous test holds the port: close it first by emptying the configuration, then block the port again.
+  writePeers(A, { peers: [] })
+  await reload()
+  assert.equal((await peersStatus()).listening, null)
+  await new Promise<void>(resolve => blocker.listen(A.port, '127.0.0.1', resolve))
+  writePeers(A, { listen: { host: '127.0.0.1', port: A.port }, peers: [{ name: 'pc-rel-b', token: TOKEN, dial: false }] })
+  await reload()
+  assert.equal(typeof (await peersStatus()).listen_retry_s, 'number')
+  writePeers(A, { peers: [] })
+  await reload()
+  assert.equal((await peersStatus()).listen_retry_s, null, 'no listener wanted any more: no retry')
+  await new Promise<void>(resolve => blocker.close(() => resolve()))
+})
