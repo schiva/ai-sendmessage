@@ -23,6 +23,13 @@ export interface AdminHooks {
   pairStatus(): Promise<Record<string, unknown>>
   pairCancel(): Promise<Record<string, unknown>>
   pairJoin(code: string): Promise<Record<string, unknown>>
+  joinOpen(p: { ttlS?: number; count?: number; address?: string; port?: number }): Promise<Record<string, unknown>>
+  joinClose(): Promise<Record<string, unknown>>
+  joinPending(): Promise<Record<string, unknown>>
+  joinApprove(id: unknown, digits: unknown): Promise<Record<string, unknown>>
+  joinStart(p: { address: unknown; port?: unknown; waitS?: unknown }): Promise<Record<string, unknown>>
+  joinStatus(request: unknown): Promise<Record<string, unknown>>
+  joinCancel(request: unknown): Promise<Record<string, unknown>>
 }
 
 function tokenMatches(given: unknown, expected: string): boolean {
@@ -204,6 +211,35 @@ export class Server extends EventEmitter {
       case 'pair_join':
         if (typeof p.code !== 'string' || p.code.trim() === '') throw new ApiError('BAD_REQUEST', '"code" is required')
         return this.admin ? await this.admin.pairJoin(p.code) : {}
+      case 'join_open': {
+        if (!this.admin) return {}
+        const num = (v: unknown, name: string): number | undefined => {
+          if (v === undefined) return undefined
+          const n = Number(v)
+          if (!Number.isFinite(n)) throw new ApiError('BAD_REQUEST', `"${name}" must be a number`)
+          return n
+        }
+        const port = num(p.port, 'port')
+        if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new ApiError('BAD_REQUEST', '"port" must be 1-65535')
+        return await this.admin.joinOpen({
+          ttlS: num(p.ttl_s, 'ttl_s'),
+          count: num(p.count, 'count'),
+          address: typeof p.address === 'string' && p.address.trim() ? p.address.trim() : undefined,
+          port,
+        })
+      }
+      case 'join_close':
+        return this.admin ? await this.admin.joinClose() : {}
+      case 'join_pending':
+        return this.admin ? await this.admin.joinPending() : {}
+      case 'join_approve':
+        return this.admin ? await this.admin.joinApprove(p.id, p.digits) : {}
+      case 'join_start':
+        return this.admin ? await this.admin.joinStart({ address: p.address, port: p.port, waitS: p.wait_s }) : {}
+      case 'join_status':
+        return this.admin ? await this.admin.joinStatus(p.request) : {}
+      case 'join_cancel':
+        return this.admin ? await this.admin.joinCancel(p.request) : {}
       case 'shutdown':
         return {}
       default:

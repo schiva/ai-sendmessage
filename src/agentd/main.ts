@@ -90,6 +90,30 @@ const server = await (async () => {
     },
     pairStatus: async () => (peers ? peers.pairStatus() : { state: 'none' }),
     pairCancel: async () => (peers ? peers.cancelPairing() : { state: 'none' }),
+    joinOpen: async o => {
+      await waitForLan()
+      if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')
+      return peers.join.open(o)
+    },
+    joinClose: async () => (peers ? peers.join.close('closed by the user') : { open: false }),
+    joinPending: async () => (peers ? { ...peers.join.pending() } : { open: false, expires_s: null, remaining: 0, requests: [], recent: [] }),
+    joinApprove: async (id, digits) => {
+      if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')
+      return { ...(await peers.join.approve(id, digits)) }
+    },
+    joinStart: async o => {
+      await waitForLan()
+      if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')
+      return { ...(await peers.join.start(o)) }
+    },
+    joinStatus: async request => {
+      if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')
+      return peers.join.status(request)
+    },
+    joinCancel: async request => {
+      if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')
+      return peers.join.cancel(request)
+    },
     pairJoin: async code => {
       await waitForLan()
       if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')

@@ -30,6 +30,19 @@ export interface Config {
   /** Connections that have not said who they are yet: at most this many in all, and at most this many from one address. */
   maxPreAuth: number
   maxPreAuthPerIp: number
+  /** Joining a new PC (docs/JOIN.md): the shortest time a window may be open for, in seconds. */
+  joinMinTtlS: number
+  /** How long a request may wait for its approval. */
+  joinRequestMs: number
+  /** How many requests may wait at the same time (a separate pool: a full pool turns new requests away, it never evicts). */
+  joinPendingMax: number
+  /** Budget of sessions a window accepts in all (aborted ones count too), per address (minimum gap) and overall (burst per 5 s). */
+  joinWindowBudget: number
+  joinIpIntervalMs: number
+  joinGlobalBurst: number
+  /** After the challenge the joining PC must reveal its nonce within this time; after approval it must confirm within joinDoneMs. */
+  joinRevealMs: number
+  joinDoneMs: number
 }
 
 function num(name: string, def: number): number {
@@ -79,5 +92,13 @@ export function loadConfig(): Config {
     directoryKeepaliveMs: num('AGENTLINK_DIRECTORY_KEEPALIVE_MS', 30_000),
     maxPreAuth: num('AGENTLINK_MAX_PREAUTH', 32),
     maxPreAuthPerIp: num('AGENTLINK_MAX_PREAUTH_PER_IP', 4),
+    joinMinTtlS: num('AGENTLINK_JOIN_MIN_TTL_S', 10),
+    joinRequestMs: num('AGENTLINK_JOIN_REQUEST_MS', 300_000),
+    joinPendingMax: num('AGENTLINK_JOIN_PENDING_MAX', 8),
+    joinWindowBudget: num('AGENTLINK_JOIN_WINDOW_BUDGET', 20),
+    joinIpIntervalMs: process.env.AGENTLINK_JOIN_IP_INTERVAL_MS === undefined ? 5_000 : Math.max(0, Number(process.env.AGENTLINK_JOIN_IP_INTERVAL_MS) || 0),
+    joinGlobalBurst: num('AGENTLINK_JOIN_GLOBAL_BURST', 3),
+    joinRevealMs: num('AGENTLINK_JOIN_REVEAL_MS', 5_000),
+    joinDoneMs: num('AGENTLINK_JOIN_DONE_MS', 10_000),
   }
 }

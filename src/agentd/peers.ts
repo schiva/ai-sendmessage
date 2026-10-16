@@ -12,6 +12,7 @@ import { ApiError, NAME_RE, REF_RE } from './protocol.ts'
 import type { ErrorCode } from './protocol.ts'
 import { DEFAULT_PORT, HOST_RE, loadPeersConfig, upsertPeerFile } from './peers-config.ts'
 import type { PeerEntry, PeersConfig } from './peers-config.ts'
+import { JoinService } from './join.ts'
 import { DEFAULT_PAIR_TTL_S, MAX_PAIR_FAILURES, decodeCode, encodeCode, lanAddresses, linkToken, pairProof, proofMatches } from './pair.ts'
 import type { HostStatus, OutFrame, RemoteAgent, RemoteGateway } from './remote.ts'
 import type { Store } from './store.ts'
@@ -19,6 +20,8 @@ import { displayFingerprint, normalizeFingerprint } from './tls.ts'
 import type { TlsMaterial } from './tls.ts'
 
 const MAX_FRAME = 512 * 1024
+/** The largest frame accepted from a connection that has not said who it is. */
+const MAX_PREAUTH_FRAME = 4096
 const HANDSHAKE_MS = 5_000
 const MAX_REMOTE_AGENTS = 200
 const KNOWN_CODES = new Set<string>([
@@ -98,6 +101,11 @@ function tokenMatches(given: unknown, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
+function rawLength(d: RawData): number {
+  if (Array.isArray(d)) return d.reduce((n, b) => n + b.length, 0)
+  return d instanceof ArrayBuffer ? d.byteLength : d.length
+}
+
 function parseFrame(data: RawData, isBinary: boolean): Record<string, unknown> | null {
   if (isBinary) return null
   try {
@@ -154,6 +162,9 @@ export class PeerManager implements RemoteGateway {
   private lastListenFailure = ''
   private stopped = false
   private unauthenticated: Array<{ ws: WebSocket; ip: string }> = []
+  private ipOf = new WeakMap<WebSocket, string>()
+  /** Joining a new PC (docs/JOIN.md). */
+  readonly join: JoinService
 
   constructor(opts: { core: Core; store: Store; cfg: Config; home: string; tls: TlsMaterial; selfHost: string; log: (line: string) => void }) {
     this.core = opts.core
@@ -163,6 +174,25 @@ export class PeerManager implements RemoteGateway {
     this.tls = opts.tls
     this.selfHost = opts.selfHost
     this.log = opts.log
+    this.join = new JoinService(
+      {
+        selfHost: opts.selfHost,
+        fingerprint: opts.tls.fingerprint,
+        openLanPort: (address, port) => this.ensureLanPort(address, port),
+        closeLanPort: () => this.releaseLanPort(),
+        peerAddress: name => this.config.peers.find(p => p.name === name)?.address ?? (this.config.peers.some(p => p.name === name) ? '' : null),
+        addJoinedPeer: async (name, token, listen) => {
+          upsertPeerFile(this.home, { name, token, dial: false }, listen)
+          await this.apply(loadPeersConfig(this.home, this.selfHost)) // a changed token also ends the link of an entry that is replaced
+        },
+        addHostPeer: async entry => {
+          upsertPeerFile(this.home, { ...entry, dial: true })
+          await this.apply(loadPeersConfig(this.home, this.selfHost))
+        },
+      },
+      opts.cfg,
+      opts.log,
+    )
   }
 
   // --- RemoteGateway ---------------------------------------------------------------
@@ -291,6 +321,7 @@ export class PeerManager implements RemoteGateway {
 
   async stop(): Promise<void> {
     this.stopped = true
+    this.join.stop()
     if (this.listenRetry) clearTimeout(this.listenRetry)
     this.listenRetry = null
     this.listenRetryAt = null
@@ -316,20 +347,32 @@ export class PeerManager implements RemoteGateway {
 
   /** Host side: opens the LAN port for one joining PC and returns the code to type there. */
   async startPairing(opts: { address?: string; port?: number; ttlS?: number }): Promise<Record<string, unknown>> {
-    const l = this.listening
-    const port = opts.port ?? l?.port ?? DEFAULT_PORT
-    let address = opts.address
-    if (!address) address = l && !isWildcard(l.host) && l.host !== '127.0.0.1' ? l.host : lanAddresses()[0]
-    if (!address) throw new ApiError('BAD_REQUEST', 'no LAN address of this PC found; pass --address <IP of this PC>')
     const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, this.cfg.pairMinTtlS), 3600)
-
     if (this.pairing) {
       clearTimeout(this.pairing.timer)
       this.pairing.state = 'cancelled'
       this.pairing.secret = ''
     }
+    const { address, port } = await this.ensureLanPort(opts.address, opts.port)
+    const secret = randomBytes(16).toString('hex')
+    const timer = setTimeout(() => this.endPairing('expired'), ttlS * 1000)
+    timer.unref()
+    this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1000, failures: 0, state: 'waiting', host: null, detail: null, timer }
+    this.log(`pairing opened on ${address}:${port} for ${ttlS}s`)
+    const others = lanAddresses().filter(a => a !== address)
+    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost, other_addresses: others }
+  }
+
+  /** Opens the LAN port for a pairing or a join window (or finds it open) and says where it is. */
+  private async ensureLanPort(addressOpt?: string, portOpt?: number): Promise<{ address: string; port: number }> {
+    const l = this.listening
+    const port = portOpt ?? l?.port ?? DEFAULT_PORT
+    let address = addressOpt
+    if (!address) address = l && !isWildcard(l.host) && l.host !== '127.0.0.1' ? l.host : lanAddresses()[0]
+    if (!address) throw new ApiError('BAD_REQUEST', 'no LAN address of this PC found; pass --address <IP of this PC>')
     const reachable = this.listening && this.listening.port === port && (this.listening.host === address || isWildcard(this.listening.host))
     if (!reachable) {
+      if (this.join.isOpen()) throw new ApiError('BAD_REQUEST', `a join window is open on ${this.listening?.host}:${this.listening?.port}; close it first ("agentctl pair --close") to use another address or port`)
       await this.stopListener()
       await this.startListener({ host: address, port })
       if (!this.listening) {
@@ -338,13 +381,13 @@ export class PeerManager implements RemoteGateway {
         throw new ApiError('INTERNAL', `cannot listen on ${address}:${port}: ${why}`)
       }
     }
-    const secret = randomBytes(16).toString('hex')
-    const timer = setTimeout(() => this.endPairing('expired'), ttlS * 1000)
-    timer.unref()
-    this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1000, failures: 0, state: 'waiting', host: null, detail: null, timer }
-    this.log(`pairing opened on ${address}:${port} for ${ttlS}s`)
-    const others = lanAddresses().filter(a => a !== address)
-    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost, other_addresses: others }
+    return { address, port }
+  }
+
+  /** A pairing or join window is over: the port goes back to what peers.json asks for, unless the other kind of window still needs it. */
+  private async releaseLanPort(): Promise<void> {
+    if (this.pairing?.state === 'waiting' || this.join.isOpen()) return
+    await this.restoreListener()
   }
 
   pairStatus(): Record<string, unknown> {
@@ -368,7 +411,7 @@ export class PeerManager implements RemoteGateway {
     p.secret = ''
     this.log(`pairing ${state}${host ? ` with ${host}` : ''}${detail ? `: ${detail}` : ''}`)
     // The port was only opened for pairing; go back to what peers.json asks for. After a success `apply` follows anyway.
-    if (state !== 'paired') void this.restoreListener()
+    if (state !== 'paired') void this.releaseLanPort()
   }
 
   private async restoreListener(): Promise<void> {
@@ -408,7 +451,7 @@ export class PeerManager implements RemoteGateway {
     this.endPairing('paired', host)
     ws.send(JSON.stringify({ t: 'paired', v: 1, host: this.selfHost }), () => {
       ws.close(1000, 'paired')
-      void this.restoreListener()
+      void this.releaseLanPort()
     })
   }
 
@@ -541,6 +584,7 @@ export class PeerManager implements RemoteGateway {
     const sameIp = this.unauthenticated.filter(e => e.ip === ip)
     if (sameIp.length >= this.cfg.maxPreAuthPerIp) drop(sameIp[0])
     if (this.unauthenticated.length >= this.cfg.maxPreAuth) drop(this.unauthenticated[0])
+    this.ipOf.set(ws, ip)
     this.unauthenticated.push({ ws, ip })
     ws.once('close', () => this.forgetUnauthenticated(ws))
   }
@@ -645,6 +689,11 @@ export class PeerManager implements RemoteGateway {
     ws.on('error', () => {})
 
     ws.on('message', (data, isBinary) => {
+      // Before a peer has identified itself a frame is small; refuse anything larger without reading it.
+      if (host === null && initiator === 'peer' && rawLength(data) > MAX_PREAUTH_FRAME) {
+        ws.terminate()
+        return
+      }
       const f = parseFrame(data, isBinary)
       if (!f) {
         ws.terminate()
@@ -655,6 +704,14 @@ export class PeerManager implements RemoteGateway {
         // Handshake phase.
         if (initiator === 'peer') {
           if (f.t === 'pair') return this.onPair(ws, f)
+          if (f.t === 'join' || f.t === 'join_reveal' || f.t === 'join_done') {
+            // A join session may wait for minutes: it leaves the pre-auth pool and its handshake timer.
+            if (this.join.onFrame(ws, f, this.ipOf.get(ws) ?? '') === 'keep') {
+              clearTimeout(authTimer)
+              this.forgetUnauthenticated(ws)
+            }
+            return
+          }
           const peer = f.t === 'hello' && f.v === 1 && typeof f.host === 'string' ? this.config.peers.find(p => p.name === f.host) : undefined
           if (!peer || !tokenMatches(f.token, peer.token)) {
             this.log(`rejected inbound peer "${String(f.host).slice(0, 64)}": ${peer ? 'bad token' : 'not in peers.json'}`)
