@@ -5,14 +5,15 @@ import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { readJsonStable } from '../client/atomic-file.ts'
-import { Client } from '../client/client.ts'
+import { Client, DEFAULT_START_TIMEOUT_MS, TOKEN_WAIT_MS } from '../client/client.ts'
 import { SAFETY_NOTE, SERVER_INSTRUCTIONS, renderMessages } from '../adapters/common/format.ts'
 import { deriveIdentity } from '../adapters/common/identity.ts'
 import { Session } from '../adapters/common/session.ts'
+import { HOOK_START_TIMEOUT_MS, HOOK_TIMEOUT_S, STOP_WAKE_WAIT_MS } from '../adapters/common/timing.ts'
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-session-'))
 process.env.AGENTLINK_HOME = tmp
@@ -191,4 +192,47 @@ test('a real call that arrives during a background reconnect still starts the da
   assert.equal(background.status, 'rejected', 'without a daemon the background call fails quietly')
   assert.equal(real.status, 'fulfilled', real.status === 'rejected' ? String(real.reason) : '')
   assert.match((real as PromiseFulfilledResult<{ self: string }>).value.self, /racer@pc-session/)
+})
+
+// --- hook time budgets ------------------------------------------------------------------------------------------
+
+test('a client that must start a daemon gives up after the time it was given, not after the default', async () => {
+  const notADir = path.join(tmp, 'not-a-folder')
+  fs.writeFileSync(notADir, 'a file where the daemon wants its data folder, so it cannot start')
+  const t0 = Date.now()
+  await assert.rejects(
+    Client.connect({ home: notADir, pipe: `\\.\pipe\agentlink-nostart-${randomBytes(4).toString('hex')}`, startTimeoutMs: 1500 }),
+    /agentd did not start within 1\.5s/,
+  )
+  const took = Date.now() - t0
+  assert.ok(took >= 1400 && took < DEFAULT_START_TIMEOUT_MS - 2000, `gave up after ${took} ms`)
+})
+
+test('a hook that cannot start a daemon ends quietly within its own budget, well before Claude Code would kill it', () => {
+  const notADir = path.join(tmp, 'not-a-folder-for-hooks')
+  fs.writeFileSync(notADir, 'x')
+  const t0 = Date.now()
+  const r = spawnSync(process.execPath, ['--no-warnings', path.join(import.meta.dirname, '../adapters/claude/hook.ts'), 'UserPromptSubmit'], {
+    input: JSON.stringify({ session_id: 'budget-0001', cwd: tmp }),
+    env: { ...process.env, AGENTLINK_HOME: notADir, AGENTLINK_PIPE: `\\.\pipe\agentlink-nostart-${randomBytes(4).toString('hex')}` },
+    encoding: 'utf8',
+    timeout: 20_000,
+  })
+  const took = Date.now() - t0
+  assert.equal(r.status, 0, `a hook never fails the session (stderr: ${r.stderr})`)
+  assert.equal(r.stdout.trim(), '', 'and says nothing')
+  assert.ok(took < HOOK_START_TIMEOUT_MS + 3000, `took ${took} ms: the start-up wait for a hook is ${HOOK_START_TIMEOUT_MS} ms`)
+})
+
+test('the slowest a hook can be stays below the timeout in plugin.json, with a margin', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '../../plugin/agentlink/.claude-plugin/plugin.json'), 'utf8')) as {
+    hooks: Record<string, Array<{ hooks: Array<{ timeout: number }> }>>
+  }
+  const worstCase = HOOK_START_TIMEOUT_MS + TOKEN_WAIT_MS + STOP_WAKE_WAIT_MS // start the daemon, read its token, wait for a new watcher (Stop)
+  const timeouts = Object.values(manifest.hooks).flatMap(groups => groups.flatMap(g => g.hooks.map(h => h.timeout)))
+  assert.ok(timeouts.length >= 5, 'the manifest declares the hooks')
+  for (const t of timeouts) {
+    assert.equal(t, HOOK_TIMEOUT_S, 'every hook has the same timeout')
+    assert.ok(t * 1000 >= worstCase + 2000, `a hook may take ${worstCase} ms, its timeout is ${t * 1000} ms: keep a margin of at least 2 s`)
+  }
 })

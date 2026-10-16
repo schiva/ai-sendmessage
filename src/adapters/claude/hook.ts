@@ -10,6 +10,7 @@ import { Client } from '../../client/client.ts'
 import { wakeAlive, wakeCommand } from '../../client/wake.ts'
 import { versionMismatchNote } from '../../version.ts'
 import { deriveIdentity } from '../common/identity.ts'
+import { HOOK_START_TIMEOUT_MS, STOP_WAKE_WAIT_MS } from '../common/timing.ts'
 import { renderMessages } from '../common/format.ts'
 import type { IncomingMessage } from '../common/format.ts'
 
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
   const identity = deriveIdentity(env, input.cwd || process.cwd())
   const sessionId = env.CLAUDE_CODE_SESSION_ID ?? identity.name
 
-  const client = await Client.connect()
+  const client = await Client.connect({ startTimeoutMs: HOOK_START_TIMEOUT_MS })
   try {
     const reg = (await client.request('register', { ...identity })) as { agent: string; address: string; unread: number }
     const agent = reg.agent
@@ -172,7 +173,7 @@ async function main(): Promise<void> {
         if (wakeEnabled() && !input.stop_hook_active) {
           const { nags } = readState(sessionId)
           // Only wait for a just-started watcher when we would ask for one; otherwise a plain check keeps the turn end fast.
-          if (wakeAlive(agent) || (nags < MAX_WAKE_NAGS && (await waitWakeAlive(agent, 2000)))) {
+          if (wakeAlive(agent) || (nags < MAX_WAKE_NAGS && (await waitWakeAlive(agent, STOP_WAKE_WAIT_MS)))) {
             if (nags > 0) writeState(sessionId, { nags: 0 })
           } else if (nags < MAX_WAKE_NAGS) {
             writeState(sessionId, { nags: nags + 1 })
