@@ -22,6 +22,9 @@ export interface Config {
   shareFullCwd: boolean
   /** The shortest time a pairing code may be valid for (seconds). */
   pairMinTtlS: number
+  /** Messages waiting in the outbox for one host that cannot be reached: at most this many, and at most this many bytes. */
+  outboxMaxMessages: number
+  outboxMaxBytes: number
 }
 
 function num(name: string, def: number): number {
@@ -66,5 +69,7 @@ export function loadConfig(): Config {
     retryMaxAttempts: num('AGENTLINK_RETRY_MAX_ATTEMPTS', 8),
     shareFullCwd: process.env.AGENTLINK_SHARE_FULL_CWD === '1',
     pairMinTtlS: num('AGENTLINK_PAIR_MIN_TTL_S', 10),
+    outboxMaxMessages: num('AGENTLINK_OUTBOX_MAX', 500),
+    outboxMaxBytes: num('AGENTLINK_OUTBOX_MAX_BYTES', 16 * 1024 * 1024),
   }
 }

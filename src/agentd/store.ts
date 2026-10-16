@@ -318,6 +318,12 @@ export class Store {
     return this.db.prepare('SELECT * FROM outbox WHERE peer=? ORDER BY created_ms, id').all(peer).map(r => plain<OutboxRow>(r))
   }
 
+  /** How many messages wait for this peer and how many bytes their frames take. */
+  outboxUsage(peer: string): { count: number; bytes: number } {
+    const r = this.db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(frame)), 0) AS b FROM outbox WHERE peer=?').get(peer) as { n: number; b: number }
+    return { count: Number(r.n), bytes: Number(r.b) }
+  }
+
   countOutbox(peer: string): number {
     const r = this.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE peer=?').get(peer) as { n: number }
     return Number(r.n)

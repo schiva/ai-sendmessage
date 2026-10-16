@@ -185,6 +185,16 @@ export class PeerManager implements RemoteGateway {
   }
 
   async send(host: string, frame: OutFrame, senderAgent: string, toDisplay: string): Promise<'stored' | 'queued_remote'> {
+    // A host that stays away must not make the outbox grow without bound. Only messages are refused: idle notices are small and expire.
+    if (frame.t === 'msg') {
+      const { count, bytes } = this.store.outboxUsage(host)
+      if (count >= this.cfg.outboxMaxMessages || bytes + JSON.stringify(frame).length > this.cfg.outboxMaxBytes) {
+        throw new ApiError(
+          'RATE_LIMITED',
+          `${count} message${count === 1 ? ' is' : 's are'} already waiting for ${host} (${Math.ceil(bytes / 1024)} KiB), the limit is ${this.cfg.outboxMaxMessages} messages or ${Math.round(this.cfg.outboxMaxBytes / 1024 / 1024)} MiB; ${host} has not been reachable. Try again when the link is up.`,
+        )
+      }
+    }
     this.store.insertOutbox({
       id: frame.id,
       peer: host,
