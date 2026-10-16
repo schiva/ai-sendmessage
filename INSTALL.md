@@ -126,7 +126,8 @@ Then, **in this order**:
 
 1. Run `agentctl wake --stop`. It ends the idle watchers (`agentctl wake`), of every agent when no `--agent <id>` is given. It asks
    each watcher to end; one that does not answer, such as a watcher of an older version, is ended by the PID it recorded, after
-   checking that this PID is really an agentctl watcher. It needs no daemon and starts none. Do not end watchers by matching
+   checking that this PID is really an agentctl watcher (a recorded PID that now belongs to another program is a stale record: it is
+   cleaned up, reported as "no watcher running", and the other program is left alone). It needs no daemon and starts none. Do not end watchers by matching
    process names: a pattern like `agentctl.*wake` also matches the shells that run your command.
 2. In every open Claude Code session run `/reload-plugins` (or end the session and start a new one). This replaces the session's
    hooks and its MCP server, which are still the old version. Each session then starts a new watcher, as its SessionStart note says.

@@ -376,7 +376,7 @@ async function gone(pid, ms) {
 }
 async function stopOne(a, graceMs) {
   const st = readState(a);
-  if (st.pid === 0 || !pidExists(st.pid)) {
+  if (st.pid === 0 || !pidExists(st.pid) || !await isWatcherProcess(st.pid)) {
     if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false });
     clearStopRequest(a);
     return { agent: a, pid: st.pid, how: "not-running" };

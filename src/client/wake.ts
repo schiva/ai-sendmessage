@@ -236,7 +236,9 @@ async function gone(pid: number, ms: number): Promise<boolean> {
 /** Ends the idle watcher of one agent (see stopWatchers). */
 async function stopOne(a: string, graceMs: number): Promise<StopReport> {
   const st = readState(a)
-  if (st.pid === 0 || !pidExists(st.pid)) {
+  // A recorded PID counts only if a watcher is running under it. Windows hands out PIDs again quickly, so the PID of a watcher that was
+  // killed can belong to some other program later: that is a stale record, not a watcher to wait for (or to refuse).
+  if (st.pid === 0 || !pidExists(st.pid) || !(await isWatcherProcess(st.pid))) {
     if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false })
     clearStopRequest(a)
     return { agent: a, pid: st.pid, how: 'not-running' }
