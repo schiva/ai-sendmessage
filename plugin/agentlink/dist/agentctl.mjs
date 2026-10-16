@@ -171,6 +171,13 @@ var Client = class _Client extends EventEmitter {
   }
 };
 
+// src/version.ts
+var VERSION = true ? "0.2.2" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+function versionMismatchNote(daemonVersion, ownVersion = VERSION) {
+  if (daemonVersion === ownVersion) return null;
+  return `the running AgentLink daemon is version ${daemonVersion} but this installation is ${ownVersion}. Run "agentctl stop" to replace it; the next command starts the new one. End idle watchers (agentctl wake) of version 0.2.0 or older first, they would restart the old daemon.`;
+}
+
 // src/client/wake.ts
 import fs2 from "node:fs";
 import path3 from "node:path";
@@ -356,6 +363,8 @@ async function main() {
     return;
   }
   const client = await Client.connect({ autostart: command !== "stop" });
+  const mismatch = command === "stop" ? null : versionMismatchNote(client.hello.server_version);
+  if (mismatch) console.error(`warning: ${mismatch}`);
   if (command === "ping") {
     out(client.hello, `agentd ${client.hello.server_version} host=${client.hello.host} pid=${client.hello.pid} lease=${client.hello.lease_ms}ms`);
     client.close();

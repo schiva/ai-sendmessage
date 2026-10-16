@@ -254,3 +254,21 @@ test('hooks: AGENTLINK_NO_WAKE=1 also keeps the Stop hook quiet', () => {
   runHook('SessionStart', input, { AGENTLINK_NO_WAKE: '1' })
   assert.equal(runHook('Stop', input, { AGENTLINK_NO_WAKE: '1' }).json, null)
 })
+
+// --- daemon and client version ----------------------------------------------------------------
+
+test('a daemon of another version is reported; the same version is not', async () => {
+  const { versionMismatchNote, VERSION } = await import('../version.ts')
+  assert.equal(versionMismatchNote(VERSION), null)
+  const note = versionMismatchNote('0.0.1', '9.9.9')
+  assert.ok(note && note.includes('0.0.1') && note.includes('9.9.9') && note.includes('agentctl stop'), String(note))
+  assert.match(String(note), /watchers/, 'it warns that old idle watchers bring the old daemon back')
+})
+
+test('with matching versions neither agentctl nor SessionStart complains', () => {
+  const start = context(runHook('SessionStart', { session_id: 'wake-session-0005', cwd: REPO }))
+  assert.ok(!/Tell the user/.test(start), start)
+  const r = spawnSync(process.execPath, ['--no-warnings', AGENTCTL, 'ping'], { env: process.env, encoding: 'utf8', timeout: 20000 })
+  assert.equal(r.status, 0)
+  assert.ok(!/warning:/.test(r.stderr), r.stderr)
+})

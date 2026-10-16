@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { homeDir } from '../../agentd/config.ts'
 import { Client } from '../../client/client.ts'
 import { wakeAlive, wakeCommand } from '../../client/wake.ts'
+import { versionMismatchNote } from '../../version.ts'
 import { deriveIdentity } from '../common/identity.ts'
 import { renderMessages } from '../common/format.ts'
 import type { IncomingMessage } from '../common/format.ts'
@@ -130,11 +131,13 @@ async function main(): Promise<void> {
       case 'SessionStart': {
         writeState(sessionId, { continues: 0, prompts: 0, nags: 0 })
         const unread = reg.unread
+        const mismatch = versionMismatchNote(client.hello.server_version)
         additionalContext(
           'SessionStart',
           `AgentLink is active: you are agent ${reg.address}. Use the agentlink MCP tools (list_agents, send_message, read_inbox) to talk to other agents.` +
             (unread > 0 ? ` You have ${unread} unread message(s); they will be shown with your next prompt.` : '') +
-            (wakeEnabled() ? ` ${wakeInstruction(agent)}` : ''),
+            (wakeEnabled() ? ` ${wakeInstruction(agent)}` : '') +
+            (mismatch ? ` Tell the user: ${mismatch}` : ''),
         )
         break
       }

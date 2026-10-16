@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { Client, ApiCallError } from './client.ts'
+import { versionMismatchNote } from '../version.ts'
 import { findSessionPid, sessionAliveCheck, waitForWake, wakeCommand, wakeOptionsFromEnv } from './wake.ts'
 
 const USAGE = `agentctl - AgentLink command line client
@@ -87,6 +88,8 @@ async function main(): Promise<void> {
     return
   }
   const client = await Client.connect({ autostart: command !== 'stop' })
+  const mismatch = command === 'stop' ? null : versionMismatchNote(client.hello.server_version)
+  if (mismatch) console.error(`warning: ${mismatch}`)
 
   if (command === 'ping') {
     out(client.hello, `agentd ${client.hello.server_version} host=${client.hello.host} pid=${client.hello.pid} lease=${client.hello.lease_ms}ms`)

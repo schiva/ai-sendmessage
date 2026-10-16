@@ -10,8 +10,9 @@ user for consent; then `node scripts/install.mjs --yes`. Never edit the user's C
 
 ## If you are changing the code
 
-- Windows 11 and Node.js 22.13+ only. TypeScript runs directly through Node's type stripping, with no build step and no
-  type check: use erasable syntax only (no `enum`, no constructor parameter properties) and write `.ts` in relative imports.
+- Windows 11 only. Node.js 22.13+ runs the plugin bundle; running or testing from source needs 22.18+ (`engines` in
+  `package.json`). TypeScript runs directly through Node's type stripping, with no build step and no type check: use erasable
+  syntax only (no `enum`, no constructor parameter properties) and write `.ts` in relative imports.
 - Layout: `src/agentd` (daemon, LAN layer, ACL), `src/client` (client library and `agentctl`), `src/adapters` (MCP server,
   Claude hooks), `src/sdk`, `src/agents`, `src/test`, `plugin/agentlink` (the Claude Code plugin), `docs`.
 - `npm test` rebuilds the plugin bundle first and fails when the committed `plugin/agentlink/dist` differs from a fresh

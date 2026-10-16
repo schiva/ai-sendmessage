@@ -18,15 +18,16 @@ Claude Code에 이렇게 말하면 저장소만 보고 플러그인을 설치합
 
 ## 현재 상태
 
-설계 단계입니다(RFP v0.2). 확정된 전제는 Windows 11 최대 5대, 정적 `peers.json`, 로컬 명명된 파이프, 에이전트 중립 구조입니다.
+버전 0.2.1. P0~P4와 Claude Code 플러그인이 구현되어 있고 전체 107개 테스트(`npm test`)가 통과합니다. 실제 두 PC(Windows 11)에서 연결, 양방향 메시지, 쉬는 세션 깨우기를 확인했습니다. 설계는 [RFP](docs/RFP.md) v0.2를 따르고, 확정된 전제는 Windows 11 최대 5대, 정적 `peers.json`, 로컬 명명된 파이프, 에이전트 중립 구조입니다.
 
 - **P0** (Claude 채널 주입 스파이크): 서버 쪽 테스트는 통과했지만, 이 계정에서는 채널이 조직 정책으로 막혀 세션 주입을 확인하지 못했습니다. 채널은 선택 어댑터로 내렸습니다. 자세한 내용은 [docs/P0.md](docs/P0.md).
 - **P1** (agentd 코어와 `agentctl`): 완료. 같은 PC에서 에이전트 등록, 이름 주소 전송, 영속 inbox, ack, idle 알림, 자동 기동이 동작하고 테스트 20개가 통과합니다.
 - **P2** (MCP 어댑터와 Claude Code hooks 어댑터): 완료. hook과 MCP 서버가 `CLAUDE_CODE_SESSION_ID`로 같은 세션을 식별합니다([docs/P2-SPIKE.md](docs/P2-SPIKE.md)). 테스트 38개, 실제 `claude -p` 세션 종단 테스트(`npm run e2e:claude`, 약 0.15달러), 대화형 두 세션 종단 테스트(`npm run e2e:interactive`, 가상 터미널로 TUI 구동, 약 0.5달러)가 통과했습니다. 대화형 테스트는 양방향 왕복, 쉬는 세션의 지연 전달, `/exit`와 `--resume` 복원까지 확인합니다.
-- **P3** (LAN 피어링): 구현 완료. TLS WebSocket 링크, 인증서 지문 고정과 공유 토큰 인증, `peers.json` 허용 목록, 오프라인 큐(디스크 보존, 재전송, 중복 제거), 원격 에이전트 목록을 갖췄습니다. 한 PC에서 포트를 달리한 데몬 여러 개로 검증했고(전체 95개 테스트 통과), 2026-10-16에 실제 두 PC(Windows, 같은 서브넷) 사이에서 링크 연결과 양방향 메시지 왕복을 확인했습니다. 지문·토큰 불일치 거부, 오프라인 큐 재전송, 방화벽 규칙 변형은 실제 PC에서 아직 검증하지 않았습니다. `agentctl pair`로 설정하는 방법은 [docs/LAN.md](docs/LAN.md).
+- **P3** (LAN 피어링): 구현 완료. TLS WebSocket 링크, 인증서 지문 고정과 공유 토큰 인증, `peers.json` 허용 목록, 오프라인 큐(디스크 보존, 재전송, 중복 제거), 원격 에이전트 목록을 갖췄습니다. 한 PC에서 포트를 달리한 데몬 여러 개로 검증했고, 2026-10-16에 실제 두 PC(Windows, 같은 서브넷) 사이에서 링크 연결과 양방향 메시지 왕복을 확인했습니다. 같은 두 PC에서 지문·토큰 불일치 거부와 오프라인 큐(끊긴 동안 쌓였다가 복귀 후 정확히 1번 전달)도 확인했습니다. 방화벽 규칙이 없을 때의 동작과 큐 만료는 실제 PC에서 아직 검증하지 않았습니다. `agentctl pair`로 설정하는 방법은 [docs/LAN.md](docs/LAN.md).
 - **P4** (ACL, 원격 idle 알림, 다른 종류의 에이전트): 구현 완료. `acl.json`으로 누가 누구에게 보낼 수 있는지 정하고([docs/ACL.md](docs/ACL.md)), 다른 PC의 에이전트가 idle이 되면 알림을 받을 수 있으며, Claude가 아닌 에이전트를 SDK나 MCP 어댑터로 붙일 수 있습니다([docs/SDK.md](docs/SDK.md)). 테스트 70개와 실제 Claude 세션 종단 테스트가 통과했습니다.
-- **플러그인**: Claude Code 어댑터를 플러그인으로 포장했습니다(`plugin/agentlink/`). 설치하면 hooks, MCP 서버, `agentctl`이 한 번에 들어옵니다. 번들이라 저장소나 `npm install`이 없어도 동작합니다. 자세한 내용은 [docs/PLUGIN.md](docs/PLUGIN.md). 테스트 79개와 실제 세션 종단 테스트(`npm run e2e:plugin`)가 통과했습니다.
-- **다음**: 실제 두 PC에서 남은 검증(불일치 거부, 오프라인 큐, `agentctl pair`), 외부 AI 도구(Codex CLI, Gemini CLI 등)와의 실제 연동 시험, P5(5대 구성 점검, 운영 문서).
+- **플러그인**: Claude Code 어댑터를 플러그인으로 포장했습니다(`plugin/agentlink/`). 설치하면 hooks, MCP 서버, `agentctl`이 한 번에 들어옵니다. 번들이라 저장소나 `npm install`이 없어도 동작합니다. 자세한 내용은 [docs/PLUGIN.md](docs/PLUGIN.md). 실제 세션 종단 테스트(`npm run e2e:plugin`)가 통과했습니다. 버전은 `package.json` 하나가 기준이고, 올리면 `claude plugin update`로 갱신됩니다.
+- **쉬는 세션 깨우기**: 훅은 입력, 도구 호출, 턴 종료 때만 돌아서 쉬는 세션은 메시지를 못 봅니다. 그래서 세션 시작 때 `agentctl wake`를 백그라운드로 띄우게 안내합니다. 이 감시기는 메시지를 읽거나 출력하지 않고 기다리다가, 메시지가 오면 종료해서 세션을 깨웁니다(10분에 10회 상한, 같은 순간의 메시지는 한 번에). 세션이 직접 띄워야 하므로 보장은 아닙니다. `AGENTLINK_NO_WAKE=1`로 끕니다. [INSTALL.md](INSTALL.md)와 [RFP](docs/RFP.md) D-09.
+- **다음**: 실제 두 PC에서 남은 검증(방화벽 규칙 없음, 큐 만료, `agentctl pair`, 세 대 이상), 외부 AI 도구(Codex CLI, Gemini CLI 등)와의 실제 연동 시험, P5(5대 구성 점검, 운영 문서).
 
 ### 다른 PC와 연결하기
 
@@ -47,7 +48,21 @@ claude plugin install agentlink@agentlink-marketplace
 npm run claude:config
 ```
 
-출력된 `hooks` 설정을 `~/.claude/settings.json`(또는 프로젝트의 `.claude/settings.json`)에 합치고, `mcpServers` 항목을 프로젝트 `.mcp.json`에 추가하세요. 세션 이름은 환경변수 `AGENTLINK_NAME`으로 정할 수 있고, 없으면 `<폴더명>-<세션ID 앞 4자>`가 됩니다. 도착한 메시지는 다음 프롬프트, 도구 호출 직후, 응답이 끝나는 시점에 세션에 주입됩니다. 세션이 완전히 쉬고 있을 때 도착한 메시지는 다음 입력 때까지 전달되지 않습니다(RFP D-09).
+출력된 `hooks` 설정을 `~/.claude/settings.json`(또는 프로젝트의 `.claude/settings.json`)에 합치고, `mcpServers` 항목을 프로젝트 `.mcp.json`에 추가하세요. 세션 이름은 환경변수 `AGENTLINK_NAME`으로 정할 수 있고, 없으면 `<폴더명>-<세션ID 앞 4자>`가 됩니다. 도착한 메시지는 다음 프롬프트, 도구 호출 직후, 응답이 끝나는 시점에 세션에 주입됩니다. 세션이 완전히 쉬고 있을 때 도착한 메시지는, SessionStart 안내에 따라 세션이 유휴 감시기(`agentctl wake`)를 띄워 두었다면 그것이 세션을 깨우고, 아니면 다음 입력 때 전달됩니다(RFP D-09).
+
+### 업데이트
+
+```
+claude plugin marketplace update agentlink-marketplace
+claude plugin update agentlink@agentlink-marketplace
+agentctl stop
+```
+
+`agentctl stop`은 옛 코드로 떠 있는 데몬을 끕니다(다음 명령이 새 데몬을 띄웁니다). 자세한 순서와 주의점은 [INSTALL.md](INSTALL.md)의 Update 절을 보세요.
+
+### 필요한 것
+
+Windows 11. Node.js는 플러그인(번들)만 쓰면 22.13 이상, 소스를 직접 실행하거나 테스트하려면 22.18 이상(`package.json`의 `engines`)입니다.
 
 ### 빠른 시작
 
@@ -73,10 +88,10 @@ npm run agentctl -- stop
 | [docs/LOCAL-API.md](docs/LOCAL-API.md) | agentd와 어댑터 사이의 로컬 API(메서드, 오류 코드, 어댑터 매핑, 한도, P1 확정 세부) | 확정 v1.0 |
 | [INSTALL.md](INSTALL.md) | AI 에이전트(와 사람)를 위한 플러그인 설치 안내: 준비물, 계획 확인, 동의, 설치, 검증, 제거, 문제 해결 | v1.0, 격리 환경에서 검증 |
 | [AGENTS.md](AGENTS.md) | 이 저장소에서 일하는 AI 에이전트를 위한 규칙(설치 안내 링크, 코드 변경 규칙) | v1.0 |
-| [docs/PLUGIN.md](docs/PLUGIN.md) | Claude Code 플러그인: 구성, 번들링 이유, 설치, 설정, 주의점 | v0.1, 실제 세션으로 검증 |
+| [docs/PLUGIN.md](docs/PLUGIN.md) | Claude Code 플러그인: 구성, 번들링 이유, 설치, 설정, 주의점 | v0.2, 실제 세션으로 검증 |
 | [docs/ACL.md](docs/ACL.md) | acl.json 규칙, 검사 위치, 파일이 잘못됐을 때의 동작, 한계 | v1.0 |
 | [docs/SDK.md](docs/SDK.md) | 새로운 종류의 에이전트 붙이기(MCP, SDK, CLI, 로컬 API), 보안 규칙 | v1.0 |
-| [docs/LAN.md](docs/LAN.md) | LAN 연결 방식, 두 PC 설정 절차, peers.json, 문제 해결, 신뢰 경계 | v0.2, 단일 PC 다중 데몬과 실제 2PC 1회 검증 |
+| [docs/LAN.md](docs/LAN.md) | LAN 연결 방식, 두 PC 설정 절차, peers.json, 문제 해결, 신뢰 경계 | v0.2, 단일 PC 다중 데몬과 실제 2PC 검증(연결, 불일치 거부, 오프라인 큐) |
 | [docs/P0.md](docs/P0.md) | P0 채널 스파이크의 구성과 검증 결과 | 종료(선택 어댑터로 보존) |
 | [docs/P2-SPIKE.md](docs/P2-SPIKE.md) | Claude 세션 식별 스파이크(hook과 MCP 서버의 환경, 결론) | 완료 |
 
@@ -115,4 +130,3 @@ AI_SendMessage/
    ├─ SDK.md        SDK와 새 에이전트 붙이기
    └─ P0.md         P0 검증 결과
 ```
-"# ai-sendmessage" 
