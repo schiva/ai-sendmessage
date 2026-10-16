@@ -200,6 +200,9 @@ interface FakePlugin {
   scope: string
   enabled: boolean
   installPath: string | null
+  /** Set when the marketplace is a folder: the plugin is read from there, whatever version and installPath say. */
+  readFromFolder?: string
+  folderVersion?: string
 }
 interface FakeState {
   plugins: FakePlugin[]
@@ -233,7 +236,7 @@ function fakeWorld(over: Partial<FakeState> = {}) {
     daemon: '0.3.0',
     ...over,
   }
-  state.plugins = state.plugins.map(p => ({ ...p, installPath: p.installPath?.replace('@root', root) ?? null }))
+  state.plugins = state.plugins.map(p => ({ ...p, installPath: p.installPath?.replace('@root', root) ?? null, ...(p.readFromFolder ? { readFromFolder: p.readFromFolder.replace('@root', root) } : {}) }))
   const file = path.join(dir, 'state.json')
   fs.writeFileSync(file, JSON.stringify(state))
   const fenv = { ...(process.env as Record<string, string>), CLAUDE_BIN: fakeClaude, FAKE_STATE: file, AGENTLINK_UPDATE_SETTLE_MS: '20' }
@@ -446,4 +449,37 @@ test('fake: --update, --finish-update and --uninstall exclude each other', { ski
   const r = w.run('--update', '--uninstall')
   assert.equal(r.status, 2)
   assert.match(r.out, /use only one of --uninstall, --update and --finish-update/)
+})
+
+// A plugin whose marketplace is a clone is read live from that folder. "claude plugin list --json" then keeps the version and the cache
+// of the day it was installed (0.3.0 here) next to readFromFolder and folderVersion (0.4.0): the folder is what runs.
+const folderInstall = { plugins: [{ id: ID, version: '0.3.0', scope: 'user', enabled: true, installPath: '@root/0.3.0', readFromFolder: '@root/0.4.0', folderVersion: '0.4.0' }] }
+
+test('fake: a plugin read from a folder counts as the version of the folder and uses the agentctl of the folder, with no plugin update', { skip: skipFake }, () => {
+  const w = fakeWorld(folderInstall)
+  const r = w.run('--update', '--yes', '--json')
+  assert.equal(r.status, 0, r.out)
+  assert.deepEqual(w.changes(), ['plugin marketplace update agentlink-marketplace'], 'there is no cache to update')
+  assert.equal(r.json.version_before, '0.4.0', 'the version of the folder, not the one of the day it was installed')
+  assert.deepEqual(w.state().agentctlCalls, [{ from: '0.4.0', args: 'wake --stop' }], 'the agentctl of the folder, not the old cache')
+  assert.equal(r.json.pending.length, 2, 'the daemon and the sessions may still be older than the folder: reload and finish')
+  assert.ok(r.json.notes.some((n: string) => /read straight from the folder/.test(n)))
+  assert.ok(!/already the latest/.test(r.out))
+})
+
+test('fake: --finish-update for a plugin read from a folder expects the version of the folder', { skip: skipFake }, () => {
+  const w = fakeWorld({ ...folderInstall, daemon: '0.3.0' })
+  const r = w.run('--finish-update', '--yes', '--json')
+  assert.equal(r.status, 0, r.out)
+  assert.equal(r.json.daemon.version, '0.4.0')
+  assert.equal(r.json.daemon.expected, '0.4.0')
+  assert.ok(w.state().agentctlCalls.every(c => c.from === '0.4.0'), 'only the agentctl of the folder is used')
+})
+
+test('fake: the plan of --update for a plugin read from a folder has no plugin update step', { skip: skipFake }, () => {
+  const w = fakeWorld(folderInstall)
+  const r = w.run('--update', '--dry-run')
+  assert.equal(r.status, 0, r.out)
+  assert.ok(!/update agentlink@agentlink-marketplace/.test(r.out))
+  assert.match(r.out, /read straight from the folder/)
 })

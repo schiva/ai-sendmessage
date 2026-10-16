@@ -161,6 +161,13 @@ const describeSource = m => {
   return [kind, where].filter(Boolean).join(' ') || 'unknown source'
 }
 
+/**
+ * A plugin whose marketplace is a folder (a clone used as the marketplace) is read live from that folder: "claude plugin list --json"
+ * then still shows the version and cache of the day it was installed, next to readFromFolder and folderVersion. What runs is the folder,
+ * so that is the version and the place of agentctl that count.
+ */
+const live = p => (typeof p.readFromFolder === 'string' && p.readFromFolder !== '' ? { ...p, version: p.folderVersion ?? p.version, installPath: p.readFromFolder, live: true } : p)
+
 const marketplaceList = readList('marketplaces', ['plugin', 'marketplace', 'list'], marketplacesFromText)
 const pluginList = marketplaceList.error ? null : readList('plugin list', ['plugin', 'list'], pluginsFromText)
 const readError = marketplaceList.error ?? pluginList?.error
@@ -168,7 +175,7 @@ if (readError) finish(1, `${readError}. Nothing was changed.`)
 
 const marketplace = marketplaceList.items.find(m => m.name === MARKETPLACE) ?? null
 const hasMarketplace = marketplace !== null
-const pluginEntries = pluginList.items.filter(p => p.id === PLUGIN_ID)
+const pluginEntries = pluginList.items.filter(p => p.id === PLUGIN_ID).map(live)
 if (pluginEntries.length > 1) report.notes.push(`${PLUGIN_ID} is installed in more than one scope (${pluginEntries.map(p => p.scope).join(', ')})`)
 const entry = pluginEntries.find(p => p.scope === o.scope) ?? pluginEntries[0] ?? null
 const installed = entry !== null
@@ -210,7 +217,8 @@ if (mode === 'install') {
   if (!hasMarketplace) finish(1, `the marketplace "${MARKETPLACE}" is not registered, so the plugin cannot be updated. Run this script without --update to register it.`)
   report.notes.push(`installed: ${PLUGIN_ID} ${entry.version ?? 'unknown version'} (scope ${installedScope ?? 'unknown'})`)
   steps.push({ title: `refresh the marketplace "${MARKETPLACE}"`, args: ['plugin', 'marketplace', 'update', MARKETPLACE] })
-  steps.push({ title: `update ${PLUGIN_ID} (scope ${installedScope ?? o.scope})`, args: ['plugin', 'update', PLUGIN_ID, ...(installedScope ? ['--scope', installedScope] : [])] })
+  if (entry.live) report.notes.push(`${PLUGIN_ID} is read straight from the folder ${entry.installPath} (version ${entry.version}): its files are current after a git pull, there is no cache to update`)
+  else steps.push({ title: `update ${PLUGIN_ID} (scope ${installedScope ?? o.scope})`, args: ['plugin', 'update', PLUGIN_ID, ...(installedScope ? ['--scope', installedScope] : [])] })
   steps.push({ title: 'end the idle watchers (agentctl wake --stop of the new version), only if the version changed', args: null })
 } else {
   if (!installed) finish(1, `${PLUGIN_ID} is not installed, so there is no new daemon to check.`)
@@ -309,7 +317,7 @@ const after = readList('plugin list', ['plugin', 'list'], pluginsFromText)
 if (after.error) finish(1, `${after.error}, so the result could not be verified`)
 // Only the scope that was worked on counts: after uninstalling one scope the plugin may legitimately stay installed in another.
 const scopeWorkedOn = installedScope ?? o.scope
-const afterEntry = after.items.find(p => p.id === PLUGIN_ID && (p.scope === scopeWorkedOn || p.scope === null)) ?? null
+const afterEntry = after.items.map(live).find(p => p.id === PLUGIN_ID && (p.scope === scopeWorkedOn || p.scope === null)) ?? null
 
 if (mode === 'install') {
   if (!afterEntry || afterEntry.enabled === false) finish(1, `installed, but "claude plugin list" does not show ${PLUGIN_ID} as enabled`)
@@ -326,7 +334,8 @@ if (mode === 'install') {
   // update, step 1
   report.version_before = before.version ?? null
   report.version_after = afterEntry?.version ?? null
-  const changedVersion = afterEntry !== null && afterEntry.version !== before.version
+  // A plugin read from its folder has no new version to wait for: the folder is current, the running daemon and sessions may not be.
+  const changedVersion = afterEntry !== null && (afterEntry.live === true || afterEntry.version !== before.version)
   const watcherStep = report.steps.length - 1
   if (!changedVersion) {
     report.steps[watcherStep].status = 'skipped'
@@ -335,7 +344,8 @@ if (mode === 'install') {
     say(`\nThe installed version did not change (${before.version ?? 'unknown'}): already the latest. Nothing else to do.`)
     finish(0)
   }
-  say(`\nUpdated: ${before.version ?? 'unknown'} -> ${afterEntry.version}.`)
+  if (afterEntry.live) say(`\nThis plugin is read straight from ${afterEntry.installPath}: its files are version ${afterEntry.version}. Sessions and the daemon that were started earlier may still run an older one.`)
+  else say(`\nUpdated: ${before.version ?? 'unknown'} -> ${afterEntry.version}.`)
   const file = agentctlFile(afterEntry.installPath)
   if (!file || !fs.existsSync(file)) {
     report.steps[watcherStep].status = 'failed'

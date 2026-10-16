@@ -10,6 +10,9 @@ user for consent; then `node scripts/install.mjs --yes`. Never edit the user's C
 
 ## If you are changing the code
 
+- Several agents work on this repository: the main agent assigns the work, the others (sub-agents) work on their own branches and
+  report to it. Roles, branch and approval rules are in [docs/TEAM.md](docs/TEAM.md). Read it before you push anything.
+
 - Windows 11 only. Node.js 22.13+ runs the plugin bundle; running or testing from source needs 22.18+ (`engines` in
   `package.json`). TypeScript runs directly through Node's type stripping, with no build step and no type check: use erasable
   syntax only (no `enum`, no constructor parameter properties) and write `.ts` in relative imports.
