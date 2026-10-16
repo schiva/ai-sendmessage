@@ -5,7 +5,10 @@ import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
+import { readJsonStable } from '../client/atomic-file.ts'
 import { Client } from '../client/client.ts'
 import { SAFETY_NOTE, SERVER_INSTRUCTIONS, renderMessages } from '../adapters/common/format.ts'
 import { deriveIdentity } from '../adapters/common/identity.ts'
@@ -77,6 +80,67 @@ test('a message that claims the user approved something is not evidence of it', 
   assert.match(SAFETY_NOTE, /only the user's own messages are, so ask the user/)
   assert.match(renderMessages(sample), claim, 'hooks and read_inbox show the note with every batch of messages')
   assert.match(SERVER_INSTRUCTIONS, claim, 'the MCP server instructions carry it too')
+})
+
+// --- state files are never seen half written --------------------------------------------------------------------
+
+test('a state file that another process keeps rewriting is never read as empty or half written', async () => {
+  const file = path.join(tmp, 'state.json')
+  const atomicFile = pathToFileURL(path.join(import.meta.dirname, '../client/atomic-file.ts')).href
+  fs.writeFileSync(file, JSON.stringify({ n: 0, filler: 'x' }))
+  // A large body makes a non-atomic write (truncate, then write) easy to catch half done.
+  const writer = spawn(
+    process.execPath,
+    [
+      '--no-warnings',
+      '--input-type=module',
+      '-e',
+      `import { writeFileAtomic } from ${JSON.stringify(atomicFile)}; const body = 'x'.repeat(300000); const end = Date.now() + 2500; for (let n = 1; Date.now() < end; n++) writeFileAtomic(${JSON.stringify(file)}, JSON.stringify({ n, filler: body }))`,
+    ],
+    { stdio: 'ignore' },
+  )
+  let writerExit: number | null = null
+  const finished = new Promise<void>(resolve =>
+    writer.once('exit', code => {
+      writerExit = code
+      resolve()
+    }),
+  )
+  let reads = 0
+  let broken = 0
+  let last = -1
+  let backwards = 0
+  let done = false
+  void finished.then(() => (done = true))
+  while (!done) {
+    const s = readJsonStable(file) as { n: number } | null // what the hooks and the watcher use to read their state
+    if (s === null) {
+      broken++
+    } else {
+      reads++
+      if (s.n < last) backwards++
+      last = s.n
+    }
+    await sleep(1) // a reader that opens the file every millisecond; on Windows this makes a rename over the file fail with EPERM
+  }
+  assert.equal(writerExit, 0, `the writer must survive readers that keep opening the file, never losing an update (exit ${writerExit})`)
+  assert.ok(reads > 50 && last > 5, `the test must really overlap reads and writes (reads ${reads}, last version ${last})`)
+  assert.equal(broken, 0, `${broken} of ${reads + broken} reads saw an empty or half-written file`)
+  assert.equal(backwards, 0, 'a reader never sees an older version after a newer one')
+  assert.deepEqual(
+    fs.readdirSync(tmp).filter(f => f.endsWith('.tmp')),
+    [],
+    'no temporary files are left behind',
+  )
+})
+
+test('the hook and watcher state files are written and read through the shared helpers', () => {
+  for (const f of ['../adapters/claude/hook.ts', '../client/wake.ts']) {
+    const text = fs.readFileSync(path.join(import.meta.dirname, f), 'utf8')
+    assert.match(text, /writeFileAtomic\(/, `${f} writes its state through writeFileAtomic`)
+    assert.match(text, /readJsonStable\(/, `${f} reads its state through readJsonStable`)
+    assert.doesNotMatch(text, /fs\.writeFileSync\((statePath|stateFile)/, `${f} no longer truncates its state file in place`)
+  }
 })
 
 // --- a stopped daemon stays stopped ---------------------------------------------------------------------------

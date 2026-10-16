@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homeDir } from '../../agentd/config.ts'
+import { readJsonStable, writeFileAtomic } from '../../client/atomic-file.ts'
 import { Client } from '../../client/client.ts'
 import { wakeAlive, wakeCommand } from '../../client/wake.ts'
 import { versionMismatchNote } from '../../version.ts'
@@ -48,19 +49,16 @@ interface HookState {
 }
 
 function readState(sessionId: string): HookState {
-  try {
-    const s = JSON.parse(fs.readFileSync(statePath(sessionId), 'utf8')) as Partial<HookState>
-    return { continues: Number(s.continues) || 0, prompts: Number(s.prompts) || 0, nags: Number(s.nags) || 0 }
-  } catch {
-    return { continues: 0, prompts: 0, nags: 0 }
-  }
+  const s = readJsonStable(statePath(sessionId)) as Partial<HookState> | null
+  if (s === null || typeof s !== 'object') return { continues: 0, prompts: 0, nags: 0 }
+  return { continues: Number(s.continues) || 0, prompts: Number(s.prompts) || 0, nags: Number(s.nags) || 0 }
 }
 
 function writeState(sessionId: string, patch: Partial<HookState>): HookState {
   const next = { ...readState(sessionId), ...patch }
   try {
     fs.mkdirSync(path.dirname(statePath(sessionId)), { recursive: true })
-    fs.writeFileSync(statePath(sessionId), JSON.stringify(next))
+    writeFileAtomic(statePath(sessionId), JSON.stringify(next))
   } catch {
     // best effort
   }

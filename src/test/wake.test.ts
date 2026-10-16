@@ -359,3 +359,58 @@ test('an old stop request does not stop a watcher that starts later', async () =
   assert.ok(await stillRunning(w, 1200), 'it keeps waiting')
   w.child.kill()
 })
+
+// A stop request lives in a file of its own (<agent>.wake.stop): the watcher rewrites its state file on every poll, and a request
+// written into that file between its read and its write used to be lost.
+const stopRequestFile = (agent: string): string => path.join(tmp, 'hook-state', `${agent}.wake.stop`)
+
+test('a stop request in its own file ends the watcher, even though the state file never says stop', async () => {
+  const agent = (await reg('own-file')).agent
+  const w = startWatcher(agent)
+  await until(() => wakeAlive(agent))
+  fs.writeFileSync(stopRequestFile(agent), '')
+  assert.equal(await w.exited, 0, w.err())
+  assert.match(w.out(), /stopped on request/)
+  assert.equal(fs.existsSync(stopRequestFile(agent)), false, 'the watcher consumed the request')
+})
+
+test('a stop request that an older agentctl wrote into the state file still ends the watcher', async () => {
+  const agent = (await reg('legacy-flag')).agent
+  const w = startWatcher(agent)
+  await until(() => wakeAlive(agent))
+  const file = path.join(tmp, 'hook-state', `${agent}.wake.json`)
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), stop: true }))
+  assert.equal(await w.exited, 0, w.err())
+  assert.match(w.out(), /stopped on request/)
+})
+
+test('a stop request file left over from before does not stop a watcher that starts later', async () => {
+  const agent = (await reg('late-file')).agent
+  fs.mkdirSync(path.join(tmp, 'hook-state'), { recursive: true })
+  fs.writeFileSync(stopRequestFile(agent), '')
+  const w = startWatcher(agent)
+  assert.ok(await stillRunning(w, 1200), 'it keeps waiting')
+  assert.equal(fs.existsSync(stopRequestFile(agent)), false, 'and the stale request is gone')
+  w.child.kill()
+})
+
+test('wake --stop leaves no stop request behind, whether the watcher answered, was ended by its PID or was refused', async () => {
+  const answered = (await reg('clean-answered')).agent
+  const w = startWatcher(answered)
+  await until(() => wakeAlive(answered))
+  await stopWatchers(answered)
+  assert.equal(await w.exited, 0, w.err())
+  assert.equal(fs.existsSync(stopRequestFile(answered)), false, 'answered')
+
+  const fake = fakeWatcher()
+  writeWatcherState('ag_clean_killed', fake.pid as number)
+  assert.equal((await stopWatchers('ag_clean_killed', 600))[0].how, 'killed')
+  assert.equal(fs.existsSync(stopRequestFile('ag_clean_killed')), false, 'ended by its PID')
+
+  const innocent = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' })
+  children.push(innocent)
+  writeWatcherState('ag_clean_refused', innocent.pid as number)
+  assert.equal((await stopWatchers('ag_clean_refused', 600))[0].how, 'refused')
+  assert.equal(fs.existsSync(stopRequestFile('ag_clean_refused')), false, 'refused')
+  innocent.kill()
+})

@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { homeDir } from '../agentd/config.ts'
+import { readJsonStable, writeFileAtomic } from './atomic-file.ts'
 import { Client, ApiCallError } from './client.ts'
 
 /** Kinds that are worth a model turn. Delivery notices wait for the next prompt. */
@@ -34,7 +35,11 @@ interface WakeState {
   pid: number
   ts: number
   wakes: number[]
-  /** Set by `agentctl wake --stop`; the watcher notices it within one poll and ends. */
+  /**
+   * Set by `agentctl wake --stop` of version 0.2.3 and older, which read-modify-write this file like the watcher does (a request
+   * can then be overwritten). Kept so that a watcher and a stopper of different versions still understand each other; the
+   * request that cannot get lost is the stop file below.
+   */
   stop?: boolean
 }
 
@@ -42,19 +47,31 @@ function stateFile(agent: string): string {
   return path.join(homeDir(), 'hook-state', `${agent.replace(/[^A-Za-z0-9_-]/g, '_')}.wake.json`)
 }
 
-function readState(agent: string): WakeState {
+/** A stop request of its own file: nothing but `agentctl wake --stop` creates it and nothing rewrites it, so the watcher cannot overwrite it. */
+function stopFile(agent: string): string {
+  return path.join(homeDir(), 'hook-state', `${agent.replace(/[^A-Za-z0-9_-]/g, '_')}.wake.stop`)
+}
+
+const stopRequested = (agent: string): boolean => fs.existsSync(stopFile(agent))
+
+function clearStopRequest(agent: string): void {
   try {
-    const s = JSON.parse(fs.readFileSync(stateFile(agent), 'utf8')) as Partial<WakeState>
-    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter(n => typeof n === 'number') : [], stop: s.stop === true }
+    fs.rmSync(stopFile(agent), { force: true })
   } catch {
-    return { pid: 0, ts: 0, wakes: [] }
+    // best effort
   }
+}
+
+function readState(agent: string): WakeState {
+  const s = readJsonStable(stateFile(agent)) as Partial<WakeState> | null
+  if (s === null || typeof s !== 'object') return { pid: 0, ts: 0, wakes: [] }
+  return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter(n => typeof n === 'number') : [], stop: s.stop === true }
 }
 
 function writeState(agent: string, s: WakeState): void {
   try {
     fs.mkdirSync(path.dirname(stateFile(agent)), { recursive: true })
-    fs.writeFileSync(stateFile(agent), JSON.stringify(s))
+    writeFileAtomic(stateFile(agent), JSON.stringify(s))
   } catch {
     // best effort: the watcher works without its marker, the hooks just cannot see it
   }
@@ -125,7 +142,8 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 export async function waitForWake(connect: () => Promise<Client>, o: WakeOptions): Promise<WakeResult> {
   const deadline = Date.now() + o.maxMs
   let client: Client | null = null
-  writeState(o.agent, { ...readState(o.agent), stop: false }) // a stop request from before this watcher started is not for it
+  clearStopRequest(o.agent) // a stop request from before this watcher started is not for it
+  writeState(o.agent, { ...readState(o.agent), stop: false })
   try {
     for (;;) {
       if (Date.now() > deadline) return { reason: 'timeout' }
@@ -133,7 +151,7 @@ export async function waitForWake(connect: () => Promise<Client>, o: WakeOptions
       try {
         client ??= await connect()
         const st = readState(o.agent)
-        if (st.stop) return { reason: 'stopped' }
+        if (stopRequested(o.agent) || st.stop) return { reason: 'stopped' }
         writeState(o.agent, { ...st, pid: process.pid, ts: Date.now() })
         const r = (await client.request('inbox', { agent: o.agent, mode: 'peek', state: 'new', limit: 50, wait_ms: o.pollMs })) as { messages: Array<{ kind: string }> }
         let wakeable = r.messages.filter(m => WAKE_KINDS.has(m.kind)).length
@@ -162,6 +180,7 @@ export async function waitForWake(connect: () => Promise<Client>, o: WakeOptions
     }
   } finally {
     client?.close()
+    clearStopRequest(o.agent)
     const st = readState(o.agent)
     writeState(o.agent, { ...st, pid: 0, ts: 0, stop: false })
   }
@@ -221,15 +240,23 @@ export async function stopWatchers(agent?: string, graceMs = 8_000): Promise<Sto
     const st = readState(a)
     if (st.pid === 0 || !pidExists(st.pid)) {
       if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false })
+      clearStopRequest(a)
       reports.push({ agent: a, pid: st.pid, how: 'not-running' })
       continue
     }
-    writeState(a, { ...st, stop: true })
+    try {
+      fs.writeFileSync(stopFile(a), '') // the request that cannot be overwritten
+    } catch {
+      // the flag in the state file below still reaches a watcher
+    }
+    writeState(a, { ...st, stop: true }) // for watchers of version 0.2.3 and older, which only read this
     if (await gone(st.pid, graceMs)) {
+      clearStopRequest(a)
       reports.push({ agent: a, pid: st.pid, how: 'requested' })
       continue
     }
     if (!isWatcherProcess(st.pid)) {
+      clearStopRequest(a)
       writeState(a, { ...readState(a), stop: false })
       reports.push({ agent: a, pid: st.pid, how: 'refused', detail: 'the recorded PID is not an agentctl watcher (not touched)' })
       continue
@@ -237,10 +264,12 @@ export async function stopWatchers(agent?: string, graceMs = 8_000): Promise<Sto
     try {
       process.kill(st.pid)
     } catch (e) {
+      clearStopRequest(a)
       reports.push({ agent: a, pid: st.pid, how: 'refused', detail: String(e instanceof Error ? e.message : e) })
       continue
     }
     const ended = await gone(st.pid, 3_000)
+    clearStopRequest(a)
     writeState(a, { ...readState(a), pid: ended ? 0 : st.pid, ts: 0, stop: false })
     reports.push(ended ? { agent: a, pid: st.pid, how: 'killed' } : { agent: a, pid: st.pid, how: 'refused', detail: 'it did not end' })
   }
