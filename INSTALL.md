@@ -126,6 +126,9 @@ Then, **in this order**:
    process names: a pattern like `agentctl.*wake` also matches the shells that run your command.
 2. In every open Claude Code session run `/reload-plugins` (or end the session and start a new one). This replaces the session's
    hooks and its MCP server, which are still the old version. Each session then starts a new watcher, as its SessionStart note says.
+   Between step 1 and the reload, a session that is about to go idle gets a request from the Stop hook to start a watcher, and that
+   request still names the old plugin path. Start it with the new version's path (`agentctl wake --agent <id>` from the updated
+   plugin); a watcher of 0.2.1 or later never restarts a daemon, so this does not disturb the order.
 3. Run `agentctl stop`. It ends the daemon, which still has the old code; the next command starts the new one.
 4. Check `agentctl ping` (it prints `agentd <version>`) and `claude plugin list`. If the daemon is not the installed version,
    `agentctl` prints a warning that names both versions.
