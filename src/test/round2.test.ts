@@ -216,3 +216,64 @@ test('a peer that reconnects at once (as the dialer does after a drop) is not bl
     await stop(n)
   }
 })
+
+// --- R6: the daemon says in its log that it upgraded the database ----------------------------------------
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { SCHEMA_VERSION, Store } from '../agentd/store.ts'
+
+test('Store.upgrade is set for a database that was changed by opening it, and only then', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-upgrade-'))
+  try {
+    const fresh = path.join(dir, 'fresh.db')
+    const s1 = new Store(fresh)
+    assert.equal(s1.upgrade, null, 'a new database is not an upgrade')
+    s1.close()
+    const s2 = new Store(fresh)
+    assert.equal(s2.upgrade, null, 'opening a current database again changes nothing')
+    s2.close()
+
+    const old = path.join(dir, 'old.db') // as written before versions existed: version 0, the tables of version 1
+    const db = new DatabaseSync(old)
+    db.exec(`
+      CREATE TABLE agents (agent TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, ref TEXT NOT NULL, kind TEXT NOT NULL, cwd TEXT, pid INTEGER, status TEXT NOT NULL, active INTEGER NOT NULL, last_seen INTEGER NOT NULL, registered_at INTEGER NOT NULL);
+      CREATE TABLE messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, to_agent TEXT NOT NULL, from_addr TEXT NOT NULL, to_addr TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT, message TEXT NOT NULL, ts INTEGER NOT NULL, reply_to TEXT, ttl INTEGER NOT NULL, state TEXT NOT NULL, created_ms INTEGER NOT NULL);
+      CREATE TABLE outbox (id TEXT PRIMARY KEY, peer TEXT NOT NULL, frame TEXT NOT NULL, sender_agent TEXT NOT NULL, to_display TEXT NOT NULL, created_ms INTEGER NOT NULL);
+      CREATE TABLE remote_idle_subs (host TEXT NOT NULL, requester_addr TEXT NOT NULL, target_agent TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (host, requester_addr, target_agent));
+      CREATE TABLE idle_subs (requester TEXT NOT NULL, target TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (requester, target));
+    `)
+    db.close()
+    const s3 = new Store(old)
+    assert.deepEqual(s3.upgrade, { from: 1, to: SCHEMA_VERSION })
+    s3.close()
+    const s4 = new Store(old)
+    assert.equal(s4.upgrade, null, 'the second start finds nothing to upgrade')
+    s4.close()
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the daemon writes the upgrade to agentd.log', async () => {
+  const n = await makeNode('pc-u1')
+  try {
+    // A database from before versions existed, in the data folder of the node, before the daemon starts.
+    const old = new DatabaseSync(path.join(n.home, 'agentd.db'))
+    old.exec(`
+      CREATE TABLE agents (agent TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, ref TEXT NOT NULL, kind TEXT NOT NULL, cwd TEXT, pid INTEGER, status TEXT NOT NULL, active INTEGER NOT NULL, last_seen INTEGER NOT NULL, registered_at INTEGER NOT NULL);
+      CREATE TABLE messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, to_agent TEXT NOT NULL, from_addr TEXT NOT NULL, to_addr TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT, message TEXT NOT NULL, ts INTEGER NOT NULL, reply_to TEXT, ttl INTEGER NOT NULL, state TEXT NOT NULL, created_ms INTEGER NOT NULL);
+      CREATE TABLE outbox (id TEXT PRIMARY KEY, peer TEXT NOT NULL, frame TEXT NOT NULL, sender_agent TEXT NOT NULL, to_display TEXT NOT NULL, created_ms INTEGER NOT NULL);
+      CREATE TABLE remote_idle_subs (host TEXT NOT NULL, requester_addr TEXT NOT NULL, target_agent TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (host, requester_addr, target_agent));
+      CREATE TABLE idle_subs (requester TEXT NOT NULL, target TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (requester, target));
+    `)
+    old.close()
+    await start(n)
+    const log = fs.readFileSync(path.join(n.home, 'agentd.log'), 'utf8')
+    assert.match(log, new RegExp(`database upgraded from schema 1 to ${SCHEMA_VERSION}`))
+  } finally {
+    await stop(n)
+  }
+})
