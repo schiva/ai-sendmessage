@@ -182,6 +182,34 @@ hook과 MCP 서버는 모두 `CLAUDE_CODE_SESSION_ID` 환경변수를 받고, �
 - **`agentd.log`**: 데몬이 DB 스키마를 올렸으면 `database upgraded from schema <n> to <m>` 한 줄을 남긴다.
 - **ACL**: `agentctl acl init`(클라이언트 쪽 명령, 새 데몬 메서드 없음)이 기본 거부 `acl.json`을 만든다. [ACL.md](ACL.md).
 
+### 7.11 새 PC 참가 (`join_*` 로컬 API, [JOIN.md](JOIN.md), [JOIN-API.md](JOIN-API.md))
+받는 PC의 주소(IPv4와 포트)와 6자리 확인 번호(SAS)만으로 두 PC를 연결하는 메서드다(`src/agentd/join.ts`, `src/agentd/join-sas.ts`). **확인 번호(SAS)는 받는 PC의 로컬 API 결과, 오류 메시지, 로그 어디에도 포함되지 않는다.**
+
+| 메서드 | 매개변수 | 결과 |
+|---|---|---|
+| `join_open` | `{ttl_s?, count?, address?, port?}` (`ttl_s` 기본 `600`, 최소 `AGENTLINK_JOIN_MIN_TTL_S`(`10`) ~ 최대 `3600`; `count` 기본 `1`, `1`~`8`; `address`·`port`는 수신 바인딩 주소와 포트, 기본 포트 `7420`) | `{open: true, expires_s, count, host, address, port, command}` (`command`는 새 PC에서 실행할 `agentctl join <address>[:<port>]`, 포트가 7420이면 생략) |
+| `join_close` | `{}` | `{open: false}` (창을 닫고 대기 중인 요청 소켓도 모두 종료) |
+| `join_pending` | `{}` | `{open, expires_s, remaining, requests: [{id, host, address, age_s, state, replaces}], recent: [{host, address, result, ago_s}]}` (`expires_s`는 창이 닫혀 있으면 `null`; `state`는 `"pending"` 또는 `"approving"`; `replaces`는 기존 피어를 대체할 때 `{host, address}`(다이얼하지 않는 피어면 `address`가 `"(connects to this PC only)"`), 아니면 `null`; `recent`는 최근 5건의 `"joined" \| "rejected" \| "expired" \| "failed"`) |
+| `join_approve` | `{id, digits}` (`id`는 `[0-9a-f]{4}` 요청 식별자, `digits`는 6자리 확인 번호 문자열 — 공백·하이픈·점 허용) | `{ok: true, host, address}` (새 PC가 `join_done`으로 확정한 뒤 양쪽 `peers.json` 저장 완료) |
+| `join_start` | `{address, port?, wait_s?}` (`address`는 점 표기 IPv4만 허용, 호스트 이름과 IPv6는 거부; `port` 기본 `7420`; `wait_s` 기본 `300`, `5`~`3600`초로 클램프) | `{request, sas}` (`request`는 8자리 hex 로컬 요청 식별자, `sas`는 새 PC 화면에 표시할 6자리 숫자 문자열) |
+| `join_status` | `{request}` | `{state, waited_s, host?, detail?}` (`state`는 `"waiting" \| "joined" \| "failed" \| "expired" \| "cancelled"`, `host`는 받는 PC의 정규화된 호스트 이름) |
+| `join_cancel` | `{request}` | `{state}` (진행 중인 요청이면 `"cancelled"`로 종료) |
+
+- **오류 코드와 `data.reason`**:
+  - `join_open`: 숫자 아닌 `ttl_s`/`count`/`port` 또는 포트 범위(`1`~`65535`) 밖이면 `BAD_REQUEST`. LAN 포트를 열지 못하면 `INTERNAL`.
+  - `join_approve`:
+    - 창이 열려 있지 않음: `FORBIDDEN` (`data: {reason: "window_closed"}`)
+    - `id` 형식이 `[0-9a-f]{4}`가 아니거나 대기 중인 요청이 없음(아직 핸드셰이크 중 포함): `BAD_REQUEST` (`data: {reason: "unknown_request"}`)
+    - 이미 승인 진행 중(`approving`)이거나 승인 도중 새 PC가 `join_done`을 보내지 않고 끊김: `FORBIDDEN` (`data: {reason: "request_gone"}`)
+    - `digits`가 6자리 숫자로 해석되지 않음: `BAD_REQUEST` (`data: {reason: "bad_digits"}`)
+    - 번호 불일치: 요청당 3회, 창 전체 5회까지 허용. 창 전체 5회 실패에 도달하면 창을 닫고 `FORBIDDEN` (`data: {reason: "window_closed"}`), 그 전에는 `FORBIDDEN` (`data: {reason: "wrong_digits", attempts_left: 2 | 1 | 0}`, `0`이면 해당 요청 삭제).
+  - `join_start`:
+    - `address`가 IPv4가 아니거나 `port`가 `1`~`65535` 밖이거나, 이미 `waiting` 상태인 `join_start` 요청이 진행 중일 때: `BAD_REQUEST`
+    - 연결 거부(`ECONNREFUSED`, 상대에서 `agentctl pair --open` 안내), 시간 초과·도달 불가(방화벽 및 주소 안내), 잘못된 프레임: `INTERNAL`
+    - 받는 PC가 프로토콜 에러 프레임(`{t: "error", code: "FORBIDDEN", reason}`)으로 거절: `FORBIDDEN` (`data: {reason: "window_closed" | "busy" | "bad_name" | "rate_limited" | "rejected" | "request_gone" | "bad_order" | "bad_commit" | "bad_frame"}`)
+  - `join_status` / `join_cancel`: 존재하지 않는 `request`이면 `BAD_REQUEST`.
+- **환경 변수**: `AGENTLINK_JOIN_MIN_TTL_S`(`10`), `AGENTLINK_JOIN_REQUEST_MS`(`300000`), `AGENTLINK_JOIN_PENDING_MAX`(`8`), `AGENTLINK_JOIN_WINDOW_BUDGET`(`20`), `AGENTLINK_JOIN_IP_INTERVAL_MS`(`5000`), `AGENTLINK_JOIN_GLOBAL_BURST`(`3`), `AGENTLINK_JOIN_REVEAL_MS`(`5000`), `AGENTLINK_JOIN_DONE_MS`(`10000`).
+
 ## 6. 한도(초기값)
 
 | 항목 | 값 |
