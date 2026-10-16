@@ -120,16 +120,19 @@ claude plugin update agentlink@agentlink-marketplace
 
 Then, **in this order**:
 
-1. In every open Claude Code session run `/reload-plugins` (or end the session and start a new one). This replaces the session's
-   hooks and its MCP server, which are still the old version.
-2. Run `agentctl stop`. It ends the daemon, which still has the old code; the next command starts the new one.
-3. Check `agentctl ping` (it prints `agentd <version>`) and `claude plugin list`. If the daemon is not the installed version,
+1. Run `agentctl wake --stop`. It ends the idle watchers (`agentctl wake`), of every agent when no `--agent <id>` is given. It asks
+   each watcher to end; one that does not answer, such as a watcher of an older version, is ended by the PID it recorded, after
+   checking that this PID is really an agentctl watcher. It needs no daemon and starts none. Do not end watchers by matching
+   process names: a pattern like `agentctl.*wake` also matches the shells that run your command.
+2. In every open Claude Code session run `/reload-plugins` (or end the session and start a new one). This replaces the session's
+   hooks and its MCP server, which are still the old version. Each session then starts a new watcher, as its SessionStart note says.
+3. Run `agentctl stop`. It ends the daemon, which still has the old code; the next command starts the new one.
+4. Check `agentctl ping` (it prints `agentd <version>`) and `claude plugin list`. If the daemon is not the installed version,
    `agentctl` prints a warning that names both versions.
 
 Why the order matters: a daemon that is stopped while an old-version component is still running comes back as the old version,
 because that component starts it again. This happens with the MCP server of a session that was not reloaded, and with idle
-watchers (`agentctl wake`) of version 0.2.0 and older (they end when their session ends, or kill the `agentctl.mjs wake`
-process). Watchers of 0.2.1 and later never start a daemon.
+watchers of version 0.2.0 and older. Watchers of 0.2.1 and later never start a daemon.
 
 If `plugin update` says "already at the latest version" although the repository has newer commits, those commits did not change
 the version number: uninstall and install the plugin again (step 7, then step 3).

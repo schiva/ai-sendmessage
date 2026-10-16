@@ -28,12 +28,14 @@ export interface WakeOptions {
   isSessionAlive?: () => boolean
 }
 
-export type WakeResult = { reason: 'message'; count: number } | { reason: 'timeout' } | { reason: 'session-gone' }
+export type WakeResult = { reason: 'message'; count: number } | { reason: 'timeout' } | { reason: 'session-gone' } | { reason: 'stopped' }
 
 interface WakeState {
   pid: number
   ts: number
   wakes: number[]
+  /** Set by `agentctl wake --stop`; the watcher notices it within one poll and ends. */
+  stop?: boolean
 }
 
 function stateFile(agent: string): string {
@@ -43,7 +45,7 @@ function stateFile(agent: string): string {
 function readState(agent: string): WakeState {
   try {
     const s = JSON.parse(fs.readFileSync(stateFile(agent), 'utf8')) as Partial<WakeState>
-    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter(n => typeof n === 'number') : [] }
+    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter(n => typeof n === 'number') : [], stop: s.stop === true }
   } catch {
     return { pid: 0, ts: 0, wakes: [] }
   }
@@ -71,7 +73,7 @@ export function wakeOptionsFromEnv(agent: string): WakeOptions {
   }
   return {
     agent,
-    pollMs: Math.min(num('AGENTLINK_WAKE_POLL_MS', 25_000), 30_000),
+    pollMs: Math.min(num('AGENTLINK_WAKE_POLL_MS', 5_000), 30_000),
     maxMs: num('AGENTLINK_WAKE_MAX_MS', 12 * 60 * 60 * 1000),
     maxWakes: num('AGENTLINK_WAKE_MAX_WAKES', 10),
     windowMs: num('AGENTLINK_WAKE_WINDOW_MS', 10 * 60 * 1000),
@@ -123,6 +125,7 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 export async function waitForWake(connect: () => Promise<Client>, o: WakeOptions): Promise<WakeResult> {
   const deadline = Date.now() + o.maxMs
   let client: Client | null = null
+  writeState(o.agent, { ...readState(o.agent), stop: false }) // a stop request from before this watcher started is not for it
   try {
     for (;;) {
       if (Date.now() > deadline) return { reason: 'timeout' }
@@ -130,6 +133,7 @@ export async function waitForWake(connect: () => Promise<Client>, o: WakeOptions
       try {
         client ??= await connect()
         const st = readState(o.agent)
+        if (st.stop) return { reason: 'stopped' }
         writeState(o.agent, { ...st, pid: process.pid, ts: Date.now() })
         const r = (await client.request('inbox', { agent: o.agent, mode: 'peek', state: 'new', limit: 50, wait_ms: o.pollMs })) as { messages: Array<{ kind: string }> }
         let wakeable = r.messages.filter(m => WAKE_KINDS.has(m.kind)).length
@@ -159,6 +163,86 @@ export async function waitForWake(connect: () => Promise<Client>, o: WakeOptions
   } finally {
     client?.close()
     const st = readState(o.agent)
-    writeState(o.agent, { ...st, pid: 0, ts: 0 })
+    writeState(o.agent, { ...st, pid: 0, ts: 0, stop: false })
   }
+}
+
+// --- agentctl wake --stop --------------------------------------------------------------------------------------------
+
+export interface StopReport {
+  agent: string
+  pid: number
+  /** requested: the watcher saw the request and ended itself. killed: it did not answer and was ended by its PID. */
+  how: 'requested' | 'killed' | 'not-running' | 'refused'
+  detail?: string
+}
+
+/** The agents that have a watcher state file (running or not). */
+function watcherAgents(): string[] {
+  try {
+    return fs
+      .readdirSync(path.join(homeDir(), 'hook-state'))
+      .map(f => /^(.+)\.wake\.json$/.exec(f)?.[1])
+      .filter((a): a is string => typeof a === 'string')
+  } catch {
+    return []
+  }
+}
+
+/** True only if the process with this PID really is an agentctl watcher: a PID that was reused by something else must never be killed. */
+function isWatcherProcess(pid: number): boolean {
+  if (process.platform !== 'win32') return false
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    windowsHide: true,
+  })
+  const line = r.status === 0 ? (r.stdout ?? '') : ''
+  return /agentctl\.(mjs|ts)/.test(line) && /\swake(\s|$)/.test(line)
+}
+
+async function gone(pid: number, ms: number): Promise<boolean> {
+  const end = Date.now() + ms
+  while (pidExists(pid)) {
+    if (Date.now() > end) return false
+    await sleep(100)
+  }
+  return true
+}
+
+/**
+ * Ends the idle watcher of one agent, or of every agent when none is given. It asks first (the watcher checks within one poll and ends
+ * cleanly); a watcher that does not answer, such as one of an older version, is ended by the PID it recorded, after checking that this PID
+ * is an agentctl watcher. Never matches processes by name.
+ */
+export async function stopWatchers(agent?: string, graceMs = 8_000): Promise<StopReport[]> {
+  const reports: StopReport[] = []
+  for (const a of agent ? [agent] : watcherAgents()) {
+    const st = readState(a)
+    if (st.pid === 0 || !pidExists(st.pid)) {
+      if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false })
+      reports.push({ agent: a, pid: st.pid, how: 'not-running' })
+      continue
+    }
+    writeState(a, { ...st, stop: true })
+    if (await gone(st.pid, graceMs)) {
+      reports.push({ agent: a, pid: st.pid, how: 'requested' })
+      continue
+    }
+    if (!isWatcherProcess(st.pid)) {
+      writeState(a, { ...readState(a), stop: false })
+      reports.push({ agent: a, pid: st.pid, how: 'refused', detail: 'the recorded PID is not an agentctl watcher (not touched)' })
+      continue
+    }
+    try {
+      process.kill(st.pid)
+    } catch (e) {
+      reports.push({ agent: a, pid: st.pid, how: 'refused', detail: String(e instanceof Error ? e.message : e) })
+      continue
+    }
+    const ended = await gone(st.pid, 3_000)
+    writeState(a, { ...readState(a), pid: ended ? 0 : st.pid, ts: 0, stop: false })
+    reports.push(ended ? { agent: a, pid: st.pid, how: 'killed' } : { agent: a, pid: st.pid, how: 'refused', detail: 'it did not end' })
+  }
+  return reports
 }

@@ -57,7 +57,7 @@ claude plugin marketplace update agentlink-marketplace
 claude plugin update agentlink@agentlink-marketplace
 ```
 
-그다음 열려 있는 모든 Claude Code 세션에서 `/reload-plugins`를 실행하고, 그 뒤에 `agentctl stop`으로 옛 코드의 데몬을 끕니다(다음 명령이 새 데몬을 띄웁니다). 순서가 중요합니다. 다시 로드하지 않은 세션의 옛 MCP 서버가 데몬을 되살립니다. 자세한 이유는 [INSTALL.md](INSTALL.md)의 Update 절을 보세요.
+그다음 `agentctl wake --stop`으로 유휴 감시기를 끝내고(이름 패턴으로 프로세스를 죽이지 마세요), 열려 있는 모든 Claude Code 세션에서 `/reload-plugins`를 실행하고, 그 뒤에 `agentctl stop`으로 옛 코드의 데몬을 끕니다(다음 명령이 새 데몬을 띄웁니다). 순서가 중요합니다. 다시 로드하지 않은 세션의 옛 MCP 서버가 데몬을 되살립니다. 자세한 이유는 [INSTALL.md](INSTALL.md)의 Update 절을 보세요.
 
 ### 필요한 것
 

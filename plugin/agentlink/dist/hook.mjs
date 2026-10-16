@@ -179,7 +179,7 @@ function stateFile(agent) {
 function readState(agent) {
   try {
     const s = JSON.parse(fs2.readFileSync(stateFile(agent), "utf8"));
-    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [] };
+    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [], stop: s.stop === true };
   } catch {
     return { pid: 0, ts: 0, wakes: [] };
   }
@@ -193,7 +193,7 @@ function wakeCommand(agentctlFile, agent) {
 }
 
 // src/version.ts
-var VERSION = true ? "0.2.2" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.2.3" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function versionMismatchNote(daemonVersion, ownVersion = VERSION) {
   if (daemonVersion === ownVersion) return null;
   return `the running AgentLink daemon is version ${daemonVersion} but this installation is ${ownVersion}. Run "agentctl stop" to replace it; the next command starts the new one. End idle watchers (agentctl wake) of version 0.2.0 or older first, they would restart the old daemon.`;

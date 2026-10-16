@@ -172,7 +172,7 @@ var Client = class _Client extends EventEmitter {
 };
 
 // src/version.ts
-var VERSION = true ? "0.2.2" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.2.3" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function versionMismatchNote(daemonVersion, ownVersion = VERSION) {
   if (daemonVersion === ownVersion) return null;
   return `the running AgentLink daemon is version ${daemonVersion} but this installation is ${ownVersion}. Run "agentctl stop" to replace it; the next command starts the new one. End idle watchers (agentctl wake) of version 0.2.0 or older first, they would restart the old daemon.`;
@@ -189,7 +189,7 @@ function stateFile(agent) {
 function readState(agent) {
   try {
     const s = JSON.parse(fs2.readFileSync(stateFile(agent), "utf8"));
-    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [] };
+    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [], stop: s.stop === true };
   } catch {
     return { pid: 0, ts: 0, wakes: [] };
   }
@@ -208,7 +208,7 @@ function wakeOptionsFromEnv(agent) {
   };
   return {
     agent,
-    pollMs: Math.min(num("AGENTLINK_WAKE_POLL_MS", 25e3), 3e4),
+    pollMs: Math.min(num("AGENTLINK_WAKE_POLL_MS", 5e3), 3e4),
     maxMs: num("AGENTLINK_WAKE_MAX_MS", 12 * 60 * 60 * 1e3),
     maxWakes: num("AGENTLINK_WAKE_MAX_WAKES", 10),
     windowMs: num("AGENTLINK_WAKE_WINDOW_MS", 10 * 60 * 1e3),
@@ -245,6 +245,7 @@ var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitForWake(connect, o) {
   const deadline = Date.now() + o.maxMs;
   let client = null;
+  writeState(o.agent, { ...readState(o.agent), stop: false });
   try {
     for (; ; ) {
       if (Date.now() > deadline) return { reason: "timeout" };
@@ -252,6 +253,7 @@ async function waitForWake(connect, o) {
       try {
         client ??= await connect();
         const st = readState(o.agent);
+        if (st.stop) return { reason: "stopped" };
         writeState(o.agent, { ...st, pid: process.pid, ts: Date.now() });
         const r = await client.request("inbox", { agent: o.agent, mode: "peek", state: "new", limit: 50, wait_ms: o.pollMs });
         let wakeable = r.messages.filter((m) => WAKE_KINDS.has(m.kind)).length;
@@ -281,8 +283,64 @@ async function waitForWake(connect, o) {
   } finally {
     client?.close();
     const st = readState(o.agent);
-    writeState(o.agent, { ...st, pid: 0, ts: 0 });
+    writeState(o.agent, { ...st, pid: 0, ts: 0, stop: false });
   }
+}
+function watcherAgents() {
+  try {
+    return fs2.readdirSync(path3.join(homeDir(), "hook-state")).map((f) => /^(.+)\.wake\.json$/.exec(f)?.[1]).filter((a) => typeof a === "string");
+  } catch {
+    return [];
+  }
+}
+function isWatcherProcess(pid) {
+  if (process.platform !== "win32") return false;
+  const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], {
+    encoding: "utf8",
+    timeout: 1e4,
+    windowsHide: true
+  });
+  const line = r.status === 0 ? r.stdout ?? "" : "";
+  return /agentctl\.(mjs|ts)/.test(line) && /\swake(\s|$)/.test(line);
+}
+async function gone(pid, ms) {
+  const end = Date.now() + ms;
+  while (pidExists(pid)) {
+    if (Date.now() > end) return false;
+    await sleep2(100);
+  }
+  return true;
+}
+async function stopWatchers(agent, graceMs = 8e3) {
+  const reports = [];
+  for (const a of agent ? [agent] : watcherAgents()) {
+    const st = readState(a);
+    if (st.pid === 0 || !pidExists(st.pid)) {
+      if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false });
+      reports.push({ agent: a, pid: st.pid, how: "not-running" });
+      continue;
+    }
+    writeState(a, { ...st, stop: true });
+    if (await gone(st.pid, graceMs)) {
+      reports.push({ agent: a, pid: st.pid, how: "requested" });
+      continue;
+    }
+    if (!isWatcherProcess(st.pid)) {
+      writeState(a, { ...readState(a), stop: false });
+      reports.push({ agent: a, pid: st.pid, how: "refused", detail: "the recorded PID is not an agentctl watcher (not touched)" });
+      continue;
+    }
+    try {
+      process.kill(st.pid);
+    } catch (e) {
+      reports.push({ agent: a, pid: st.pid, how: "refused", detail: String(e instanceof Error ? e.message : e) });
+      continue;
+    }
+    const ended = await gone(st.pid, 3e3);
+    writeState(a, { ...readState(a), pid: ended ? 0 : st.pid, ts: 0, stop: false });
+    reports.push(ended ? { agent: a, pid: st.pid, how: "killed" } : { agent: a, pid: st.pid, how: "refused", detail: "it did not end" });
+  }
+  return reports;
 }
 
 // src/client/agentctl.ts
@@ -306,6 +364,8 @@ Commands:
   watch              stream incoming messages until interrupted
   wake               wait, without reading anything, until a message is waiting, then print one line and exit.
                      Run it as a background command in a Claude Code session so a message wakes the idle session.
+  wake --stop        end the idle watcher of --agent <id>, or of every agent when none is given. Asks the watcher to end;
+                     one that does not answer is ended by its recorded PID (checked to be a watcher). Needs no daemon.
   ping               start agentd if needed and print its info
   acl [reload]       show the ACL (who may send to whom); reload re-reads acl.json
   acl check <from> <to>  ask whether name@host may send to name@host
@@ -342,6 +402,7 @@ var { values, positionals } = parseArgs({
     wait: { type: "string" },
     state: { type: "string" },
     peek: { type: "boolean" },
+    stop: { type: "boolean" },
     local: { type: "boolean" },
     address: { type: "string" },
     port: { type: "string" },
@@ -361,6 +422,17 @@ async function main() {
   if (!command || values.help) {
     console.log(USAGE);
     return;
+  }
+  if (command === "wake" && values.stop) {
+    const reports = await stopWatchers(values.agent ?? process.env.AGENTLINK_AGENT);
+    const describe = (r) => {
+      if (r.how === "not-running") return "no watcher running";
+      if (r.how === "requested") return `watcher (pid ${r.pid}) stopped`;
+      if (r.how === "killed") return `watcher (pid ${r.pid}) did not answer and was ended by its PID`;
+      return `not stopped: ${r.detail ?? "unknown reason"}`;
+    };
+    out(reports, reports.length === 0 ? "no idle watcher found" : reports.map((r) => `${r.agent}: ${describe(r)}`).join("\n"));
+    process.exit(reports.some((r) => r.how === "refused") ? 1 : 0);
   }
   const client = await Client.connect({ autostart: command !== "stop" });
   const mismatch = command === "stop" ? null : versionMismatchNote(client.hello.server_version);
@@ -553,6 +625,8 @@ ${m.message}`).join("\n\n"));
         console.log(
           `AgentLink: ${n} new message${n === 1 ? "" : "s"} arrived while this session was idle. Call read_inbox to read ${n === 1 ? "it" : "them"}, then start the watcher again in the background: ${wakeCommand(fileURLToPath2(import.meta.url), agent)}`
         );
+      } else if (r.reason === "stopped") {
+        console.log(`AgentLink: the idle watcher was stopped on request (agentctl wake --stop). Start it again once you want to be woken by messages: ${wakeCommand(fileURLToPath2(import.meta.url), agent)}`);
       } else {
         console.log(`AgentLink: the watcher stopped after its time limit. Start it again if you still want to be woken: ${wakeCommand(fileURLToPath2(import.meta.url), agent)}`);
       }

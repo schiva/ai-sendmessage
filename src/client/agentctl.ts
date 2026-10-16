@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { Client, ApiCallError } from './client.ts'
 import { versionMismatchNote } from '../version.ts'
-import { findSessionPid, sessionAliveCheck, waitForWake, wakeCommand, wakeOptionsFromEnv } from './wake.ts'
+import { findSessionPid, sessionAliveCheck, stopWatchers, waitForWake, wakeCommand, wakeOptionsFromEnv } from './wake.ts'
 
 const USAGE = `agentctl - AgentLink command line client
 
@@ -26,6 +26,8 @@ Commands:
   watch              stream incoming messages until interrupted
   wake               wait, without reading anything, until a message is waiting, then print one line and exit.
                      Run it as a background command in a Claude Code session so a message wakes the idle session.
+  wake --stop        end the idle watcher of --agent <id>, or of every agent when none is given. Asks the watcher to end;
+                     one that does not answer is ended by its recorded PID (checked to be a watcher). Needs no daemon.
   ping               start agentd if needed and print its info
   acl [reload]       show the ACL (who may send to whom); reload re-reads acl.json
   acl check <from> <to>  ask whether name@host may send to name@host
@@ -63,6 +65,7 @@ const { values, positionals } = parseArgs({
     wait: { type: 'string' },
     state: { type: 'string' },
     peek: { type: 'boolean' },
+    stop: { type: 'boolean' },
     local: { type: 'boolean' },
     address: { type: 'string' },
     port: { type: 'string' },
@@ -86,6 +89,18 @@ async function main(): Promise<void> {
   if (!command || values.help) {
     console.log(USAGE)
     return
+  }
+  if (command === 'wake' && values.stop) {
+    // No daemon needed, and none may be started: this is what an update runs before it replaces the daemon.
+    const reports = await stopWatchers(values.agent ?? process.env.AGENTLINK_AGENT)
+    const describe = (r: (typeof reports)[number]): string => {
+      if (r.how === 'not-running') return 'no watcher running'
+      if (r.how === 'requested') return `watcher (pid ${r.pid}) stopped`
+      if (r.how === 'killed') return `watcher (pid ${r.pid}) did not answer and was ended by its PID`
+      return `not stopped: ${r.detail ?? 'unknown reason'}`
+    }
+    out(reports, reports.length === 0 ? 'no idle watcher found' : reports.map(r => `${r.agent}: ${describe(r)}`).join('\n'))
+    process.exit(reports.some(r => r.how === 'refused') ? 1 : 0)
   }
   const client = await Client.connect({ autostart: command !== 'stop' })
   const mismatch = command === 'stop' ? null : versionMismatchNote(client.hello.server_version)
@@ -287,6 +302,8 @@ async function main(): Promise<void> {
           `AgentLink: ${n} new message${n === 1 ? '' : 's'} arrived while this session was idle. Call read_inbox to read ${n === 1 ? 'it' : 'them'}, ` +
             `then start the watcher again in the background: ${wakeCommand(fileURLToPath(import.meta.url), agent)}`,
         )
+      } else if (r.reason === 'stopped') {
+        console.log(`AgentLink: the idle watcher was stopped on request (agentctl wake --stop). Start it again once you want to be woken by messages: ${wakeCommand(fileURLToPath(import.meta.url), agent)}`)
       } else {
         console.log(`AgentLink: the watcher stopped after its time limit. Start it again if you still want to be woken: ${wakeCommand(fileURLToPath(import.meta.url), agent)}`)
       }

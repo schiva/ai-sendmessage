@@ -9,7 +9,7 @@ import type { ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Client } from '../client/client.ts'
-import { findSessionPid, wakeAlive, wakeCommand } from '../client/wake.ts'
+import { findSessionPid, stopWatchers, wakeAlive, wakeCommand } from '../client/wake.ts'
 
 const REPO = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const AGENTCTL = path.join(REPO, 'src/client/agentctl.ts')
@@ -271,4 +271,91 @@ test('with matching versions neither agentctl nor SessionStart complains', () =>
   const r = spawnSync(process.execPath, ['--no-warnings', AGENTCTL, 'ping'], { env: process.env, encoding: 'utf8', timeout: 20000 })
   assert.equal(r.status, 0)
   assert.ok(!/warning:/.test(r.stderr), r.stderr)
+})
+
+// --- agentctl wake --stop --------------------------------------------------------------------------------------------
+
+function agentctl(args: string[], env: Record<string, string> = {}): { status: number | null; out: string; err: string } {
+  const r = spawnSync(process.execPath, ['--no-warnings', AGENTCTL, ...args], { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 60_000 })
+  return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }
+}
+
+function writeWatcherState(agent: string, pid: number): void {
+  fs.mkdirSync(path.join(tmp, 'hook-state'), { recursive: true })
+  fs.writeFileSync(path.join(tmp, 'hook-state', `${agent}.wake.json`), JSON.stringify({ pid, ts: Date.now(), wakes: [] }))
+}
+
+/** A process that looks like a watcher in the process list but never answers a stop request (like a watcher of an older version). */
+function fakeWatcher(): ChildProcess {
+  const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', 'agentctl.ts', 'wake'], { stdio: 'ignore' })
+  children.push(c)
+  return c
+}
+
+test('wake --stop ends a running watcher cleanly', async () => {
+  const agent = (await reg('stoppable')).agent
+  const w = startWatcher(agent)
+  await until(() => wakeAlive(agent))
+  const r = agentctl(['wake', '--stop', '--agent', agent])
+  assert.equal(r.status, 0, r.err)
+  assert.match(r.out, /watcher \(pid \d+\) stopped/)
+  assert.equal(await w.exited, 0, w.err())
+  assert.match(w.out(), /stopped on request/)
+  assert.equal(wakeAlive(agent), false)
+})
+
+test('wake --stop without --agent ends the watchers of every agent', async () => {
+  const a = (await reg('stop-a')).agent
+  const b = (await reg('stop-b')).agent
+  const wa = startWatcher(a)
+  const wb = startWatcher(b)
+  await until(() => wakeAlive(a) && wakeAlive(b))
+  const r = agentctl(['wake', '--stop'])
+  assert.equal(r.status, 0, r.err)
+  assert.ok(r.out.includes(a) && r.out.includes(b), r.out)
+  assert.equal(await wa.exited, 0)
+  assert.equal(await wb.exited, 0)
+})
+
+test('wake --stop needs no daemon and does not start one', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-nodaemon-'))
+  const pipe = `\\.\pipe\agentlink-nodaemon-${randomBytes(4).toString('hex')}`
+  const r = agentctl(['wake', '--stop'], { AGENTLINK_HOME: home, AGENTLINK_PIPE: pipe })
+  assert.equal(r.status, 0, r.err)
+  assert.match(r.out, /no idle watcher found/)
+  await assert.rejects(Client.connect({ autostart: false, pipe, home }), /ENOENT|ECONNREFUSED/, 'no daemon was started')
+  fs.rmSync(home, { recursive: true, force: true })
+})
+
+test('a watcher that does not answer is ended by its recorded PID', async () => {
+  const fake = fakeWatcher()
+  writeWatcherState('ag_fake_old', fake.pid as number)
+  const reports = await stopWatchers('ag_fake_old', 600)
+  assert.equal(reports[0].how, 'killed', JSON.stringify(reports))
+  await until(() => fake.exitCode !== null || fake.signalCode !== null, 3000)
+})
+
+test('a PID that is not an agentctl watcher is never killed', async () => {
+  const innocent = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' })
+  children.push(innocent)
+  writeWatcherState('ag_fake_other', innocent.pid as number)
+  const reports = await stopWatchers('ag_fake_other', 600)
+  assert.equal(reports[0].how, 'refused', JSON.stringify(reports))
+  assert.match(String(reports[0].detail), /not an agentctl watcher/)
+  assert.equal(innocent.exitCode, null, 'the unrelated process is still running')
+  innocent.kill()
+})
+
+test('stopping an agent that has no watcher is not an error', async () => {
+  const reports = await stopWatchers('ag_never_started', 300)
+  assert.deepEqual(reports.map(r => r.how), ['not-running'])
+})
+
+test('an old stop request does not stop a watcher that starts later', async () => {
+  const agent = (await reg('late')).agent
+  fs.mkdirSync(path.join(tmp, 'hook-state'), { recursive: true })
+  fs.writeFileSync(path.join(tmp, 'hook-state', `${agent}.wake.json`), JSON.stringify({ pid: 0, ts: 0, wakes: [], stop: true }))
+  const w = startWatcher(agent)
+  assert.ok(await stillRunning(w, 1200), 'it keeps waiting')
+  w.child.kill()
 })
