@@ -18,6 +18,8 @@ export interface Config {
   /** A message the other host refused for a passing reason (rate limit) is sent again: first after this long, then twice as long each time (at most a minute). */
   retryBaseMs: number
   retryMaxAttempts: number
+  /** Other hosts see only the folder name of an agent's working directory; with this on they see the whole path. */
+  shareFullCwd: boolean
 }
 
 function num(name: string, def: number): number {
@@ -60,5 +62,6 @@ export function loadConfig(): Config {
     listenRetryMs: num('AGENTLINK_LISTEN_RETRY_MS', 15_000),
     retryBaseMs: num('AGENTLINK_RETRY_BASE_MS', 2_000),
     retryMaxAttempts: num('AGENTLINK_RETRY_MAX_ATTEMPTS', 8),
+    shareFullCwd: process.env.AGENTLINK_SHARE_FULL_CWD === '1',
   }
 }

@@ -329,7 +329,8 @@ export class PeerManager implements RemoteGateway {
     timer.unref()
     this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1000, failures: 0, state: 'waiting', host: null, detail: null, timer }
     this.log(`pairing opened on ${address}:${port} for ${ttlS}s`)
-    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost }
+    const others = lanAddresses().filter(a => a !== address)
+    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost, other_addresses: others }
   }
 
   pairStatus(): Record<string, unknown> {

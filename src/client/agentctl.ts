@@ -173,9 +173,12 @@ async function main(): Promise<void> {
       address: values.address,
       port: values.port ? Number(values.port) : undefined,
       ttl_s: values.ttl ? Number(values.ttl) : undefined,
-    })) as { code: string; address: string; port: number; expires_s: number; host: string }
+    })) as { code: string; address: string; port: number; expires_s: number; host: string; other_addresses?: string[] }
     console.log(`On the other PC run:\n\n  agentctl pair ${r.code}\n`)
     console.log(`This PC is "${r.host}" at ${r.address}:${r.port}. The code works once and expires in ${Math.round(r.expires_s / 60)} min.`)
+    if (!values.address && (r.other_addresses?.length ?? 0) > 0) {
+      console.log(`This PC also has: ${r.other_addresses?.join(', ')}. If the other PC cannot reach ${r.address}, run again with --address <one of these>.`)
+    }
     if (process.platform === 'win32') {
       const fw = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "(Get-NetFirewallRule -DisplayName 'AgentLink*' -ErrorAction SilentlyContinue | Measure-Object).Count"], { encoding: 'utf8', timeout: 10_000 })
       if (fw.status === 0 && fw.stdout.trim() === '0') {

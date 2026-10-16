@@ -229,3 +229,97 @@ test('a final refusal is not retried: an unknown agent is reported at once and l
     await stop(rx)
   }
 })
+
+// --- D4: which address pair advertises -------------------------------------------------------------
+
+import { lanAddresses } from '../agentd/pair.ts'
+
+const nic = (address: string, over: Record<string, unknown> = {}) => ({ address, netmask: '255.255.255.0', family: 'IPv4' as const, mac: '00:00:00:00:00:00', internal: false, cidr: `${address}/24`, ...over })
+
+test('the address of the real LAN comes before virtual adapters, VPNs and public ranges', () => {
+  const ifaces = {
+    'vEthernet (WSL)': [nic('172.28.0.1')],
+    Tailscale: [nic('100.64.1.2')],
+    'Ethernet 2': [nic('203.0.113.9')],
+    Ethernet: [nic('192.168.0.5')],
+    'Loopback Pseudo-Interface 1': [nic('127.0.0.1', { internal: true })],
+    Bluetooth: [nic('169.254.7.154')],
+  }
+  assert.deepEqual(lanAddresses(ifaces), ['192.168.0.5', '203.0.113.9', '172.28.0.1', '100.64.1.2'])
+})
+
+test('with a single adapter the order is unchanged, and an IPv6-only or empty host yields nothing', () => {
+  assert.deepEqual(lanAddresses({ Ethernet: [nic('10.1.2.3')] }), ['10.1.2.3'])
+  assert.deepEqual(lanAddresses({ Ethernet: [{ ...nic('fe80::1'), family: 'IPv6' as const }] }), [])
+  assert.deepEqual(lanAddresses({}), [])
+})
+
+test('adapter names are matched as words: a TAP adapter is virtual, a "Laptop LAN" is not', () => {
+  const ifaces = { 'Tap-Windows Adapter': [nic('10.0.0.1')], Ethernet: [nic('192.168.0.9')], 'Laptop LAN': [nic('192.168.5.5')] }
+  assert.deepEqual(lanAddresses(ifaces), ['192.168.0.9', '192.168.5.5', '10.0.0.1'])
+})
+
+// --- D5: what other hosts learn about the working directory ----------------------------------------
+
+// Built from parts: a backslash inside a string literal is easy to lose when this file is edited by a tool.
+const win = (...parts: string[]): string => parts.join(String.fromCharCode(92))
+const FULL_CWD = win('C:', 'Users', 'secret-user', 'work', 'my-project')
+
+import { folderName } from '../agentd/core.ts'
+
+test('folderName keeps the last part of a path with either kind of separator', () => {
+  assert.equal(folderName(win('C:', 'Users', 'Win10', 'project', 'my-app')), 'my-app')
+  assert.equal(folderName('C:/a/b/c/'), 'c')
+  assert.equal(folderName('/home/u/proj'), 'proj')
+  assert.equal(folderName('plain'), 'plain')
+  assert.equal(folderName(''), null)
+  assert.equal(folderName(null), null)
+})
+
+async function remoteCwd(shareFull: boolean, hostA: string, hostB: string): Promise<string | null> {
+  const owner = await makeNode(hostA, shareFull ? { AGENTLINK_SHARE_FULL_CWD: '1' } : {})
+  const watcher = await makeNode(hostB)
+  const full = FULL_CWD
+  try {
+    await start(owner)
+    await start(watcher)
+    await pair(owner, watcher)
+    const own = (await (owner.client as Client).request('register', { name: 'carol', kind: 'test', key: 'k:carol', cwd: full })) as { agent: string }
+    const me = await reg(watcher, 'viewer')
+    const local = (await (owner.client as Client).request('list', { agent: own.agent, scope: 'local' })) as { agents: unknown[] }
+    assert.ok(Array.isArray(local.agents))
+    let seen: string | null | undefined
+    await until(async () => {
+      const r = (await (watcher.client as Client).request('list', { agent: me.agent, scope: 'all' })) as { agents: Array<{ address: string; cwd: string | null }> }
+      const carol = r.agents.find(a => a.address === `carol@${hostA}`)
+      if (carol) seen = carol.cwd
+      return carol !== undefined
+    }, 10_000, 'the other host to list carol')
+    return seen ?? null
+  } finally {
+    await stop(owner)
+    await stop(watcher)
+  }
+}
+
+test('another host sees only the folder name of a working directory', async () => {
+  assert.equal(await remoteCwd(false, 'pc-d1', 'pc-d2'), 'my-project')
+})
+
+test('with AGENTLINK_SHARE_FULL_CWD=1 another host sees the whole path', async () => {
+  assert.equal(await remoteCwd(true, 'pc-d3', 'pc-d4'), FULL_CWD)
+})
+
+test('the agent on the same host still sees the full path of its neighbours', async () => {
+  const n = await makeNode('pc-d5')
+  try {
+    await start(n)
+    const full = FULL_CWD
+    await (n.client as Client).request('register', { name: 'carol', kind: 'test', key: 'k:carol', cwd: full })
+    const me = await reg(n, 'viewer')
+    const r = (await (n.client as Client).request('list', { agent: me.agent, scope: 'local' })) as { agents: Array<{ address: string; cwd: string | null }> }
+    assert.equal(r.agents.find(a => a.address === 'carol@pc-d5')?.cwd, full)
+  } finally {
+    await stop(n)
+  }
+})
