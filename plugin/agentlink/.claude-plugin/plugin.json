@@ -1,0 +1,52 @@
+{
+  "name": "agentlink",
+  "displayName": "AgentLink",
+  "version": "0.1.0",
+  "description": "Lets this Claude Code session exchange messages with other AI agents on this PC and on other PCs of the LAN.",
+  "author": { "name": "AI_SendMessage project" },
+  "keywords": ["agents", "messaging", "lan", "multi-agent"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/dist/hook.mjs", "SessionStart"], "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/dist/hook.mjs", "UserPromptSubmit"], "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/dist/hook.mjs", "PostToolUse"], "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/dist/hook.mjs", "Stop"], "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/dist/hook.mjs", "SessionEnd"], "timeout": 10 }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "agentlink": {
+      "command": "node",
+      "args": ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.mjs"]
+    }
+  }
+}

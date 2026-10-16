@@ -1,0 +1,10 @@
+node_modules/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# P0 spike registration: create it locally (see docs/P0.md); it must not prompt people who clone the repository.
+/.mcp.json
+
+# graft helper for ripgrep, local tooling only.
+/.ignore

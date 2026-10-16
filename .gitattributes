@@ -1,0 +1,3 @@
+# Keep LF on every platform. The plugin shell script (bin/agentctl, its shebang breaks with CRLF) and the committed
+# bundles (a test compares them byte for byte with a fresh build) must not be converted to CRLF on Windows checkouts.
+* text=auto eol=lf

@@ -1,0 +1,38 @@
+{
+  "name": "ai-sendmessage",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "LAN extension of Claude Code SendMessage (see docs/RFP.md)",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "p0:server": "node src/p0/channel.ts",
+    "p0:test": "node src/p0/selftest.ts",
+    "agentd": "node src/agentd/main.ts",
+    "agentctl": "node --no-warnings src/client/agentctl.ts",
+    "test": "node --no-warnings --test src/test/p1.test.ts src/test/p2.test.ts src/test/p3.test.ts src/test/p4.test.ts src/test/p5-plugin.test.ts",
+    "claude:config": "node --no-warnings src/adapters/claude/print-config.ts",
+    "mcp:server": "node --no-warnings src/adapters/mcp/server.ts",
+    "e2e:claude": "node --no-warnings src/test/e2e-claude.ts",
+    "e2e:interactive": "node --no-warnings src/test/e2e-interactive.ts",
+    "agent:echo": "node --no-warnings src/agents/echo-agent.ts",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "e2e:plugin": "node --no-warnings src/test/e2e-plugin.ts",
+    "pretest": "npm run build:plugin"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "selfsigned": "^5.5.0",
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
+  },
+  "bin": {
+    "agentctl": "src/client/agentctl.ts"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "node-pty": "^1.1.0"
+  }
+}

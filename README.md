@@ -17,13 +17,23 @@
 - **P2** (MCP 어댑터와 Claude Code hooks 어댑터): 완료. hook과 MCP 서버가 `CLAUDE_CODE_SESSION_ID`로 같은 세션을 식별합니다([docs/P2-SPIKE.md](docs/P2-SPIKE.md)). 테스트 38개, 실제 `claude -p` 세션 종단 테스트(`npm run e2e:claude`, 약 0.15달러), 대화형 두 세션 종단 테스트(`npm run e2e:interactive`, 가상 터미널로 TUI 구동, 약 0.5달러)가 통과했습니다. 대화형 테스트는 양방향 왕복, 쉬는 세션의 지연 전달, `/exit`와 `--resume` 복원까지 확인합니다.
 - **P3** (LAN 피어링): 구현 완료. TLS WebSocket 링크, 인증서 지문 고정과 공유 토큰 인증, `peers.json` 허용 목록, 오프라인 큐(디스크 보존, 재전송, 중복 제거), 원격 에이전트 목록을 갖췄습니다. 한 PC에서 포트를 달리한 데몬 여러 개로 검증했고(테스트 16개, 전체 54개 통과), **실제 두 번째 PC와 방화벽을 거친 검증은 아직 하지 않았습니다**. 절차는 [docs/LAN.md](docs/LAN.md).
 - **P4** (ACL, 원격 idle 알림, 다른 종류의 에이전트): 구현 완료. `acl.json`으로 누가 누구에게 보낼 수 있는지 정하고([docs/ACL.md](docs/ACL.md)), 다른 PC의 에이전트가 idle이 되면 알림을 받을 수 있으며, Claude가 아닌 에이전트를 SDK나 MCP 어댑터로 붙일 수 있습니다([docs/SDK.md](docs/SDK.md)). 테스트 70개와 실제 Claude 세션 종단 테스트가 통과했습니다.
+- **플러그인**: Claude Code 어댑터를 플러그인으로 포장했습니다(`plugin/agentlink/`). 설치하면 hooks, MCP 서버, `agentctl`이 한 번에 들어옵니다. 번들이라 저장소나 `npm install`이 없어도 동작합니다. 자세한 내용은 [docs/PLUGIN.md](docs/PLUGIN.md). 테스트 79개와 실제 세션 종단 테스트(`npm run e2e:plugin`)가 통과했습니다.
 - **다음**: 실제 두 PC 검증, 외부 AI 도구(Codex CLI, Gemini CLI 등)와의 실제 연동 시험, P5(5대 구성 점검, 운영 문서).
 
 ### 다른 PC와 연결하기
 
 `%LOCALAPPDATA%AgentLinkpeers.json`에 상대 PC의 이름, IP, 공유 토큰, 인증서 지문을 적고 `npm run agentctl -- peers reload`를 실행합니다. 이후 `bob@pc-b`처럼 호스트를 붙여 보내면 됩니다. 자세한 절차와 방화벽 설정은 [docs/LAN.md](docs/LAN.md)를 보세요.
 
-### Claude Code에 연결하기
+### Claude Code에 플러그인으로 설치하기 (권장)
+
+```
+claude plugin marketplace add schiva/ai-sendmessage
+claude plugin install agentlink@agentlink-marketplace
+```
+
+저장소를 이미 받아 두었다면 `claude plugin marketplace add <저장소 경로>`로도 됩니다. 설치 없이 한 세션에서만 시험하려면 `claude --plugin-dir <저장소 경로>/plugin/agentlink`. 자세한 내용(범위, 제거, 업데이트, 주의점)은 [docs/PLUGIN.md](docs/PLUGIN.md). 소스를 고친 뒤에는 `npm run build:plugin`으로 번들을 다시 만듭니다(`npm test`가 자동으로 합니다).
+
+### Claude Code에 수동으로 연결하기 (플러그인을 쓰지 않을 때)
 
 ```
 npm run claude:config
@@ -53,6 +63,7 @@ npm run agentctl -- stop
 |---|---|---|
 | [docs/RFP.md](docs/RFP.md) | 목적, 범위, 구성, 기능/보안 요구사항, 프로토콜, 위험, 단계별 계획, 인수 기준 | 초안 v0.2 |
 | [docs/LOCAL-API.md](docs/LOCAL-API.md) | agentd와 어댑터 사이의 로컬 API(메서드, 오류 코드, 어댑터 매핑, 한도, P1 확정 세부) | 확정 v1.0 |
+| [docs/PLUGIN.md](docs/PLUGIN.md) | Claude Code 플러그인: 구성, 번들링 이유, 설치, 설정, 주의점 | v0.1, 실제 세션으로 검증 |
 | [docs/ACL.md](docs/ACL.md) | acl.json 규칙, 검사 위치, 파일이 잘못됐을 때의 동작, 한계 | v1.0 |
 | [docs/SDK.md](docs/SDK.md) | 새로운 종류의 에이전트 붙이기(MCP, SDK, CLI, 로컬 API), 보안 규칙 | v1.0 |
 | [docs/LAN.md](docs/LAN.md) | LAN 연결 방식, 두 PC 설정 절차, peers.json, 문제 해결, 신뢰 경계 | v0.1, 단일 PC 다중 데몬으로 검증 |
@@ -71,7 +82,6 @@ npm run agentctl -- stop
 ```
 AI_SendMessage/
 ├─ README.md      프로젝트 개요와 문서 색인
-├─ .mcp.json      P0 채널 서버 등록
 ├─ package.json
 ├─ src/
 │  ├─ agentd/     데몬 코어(config, protocol, store, core, server, main)와 LAN 계층(peers, peers-config, tls, remote)
@@ -81,10 +91,14 @@ AI_SendMessage/
 │  ├─ adapters/   common(신원, 메시지 형식, 세션), mcp(MCP 서버), claude(hooks, 설정 생성)
 │  ├─ test/       P1~P4 테스트와 실제 Claude 종단 테스트(e2e-claude.ts, e2e-interactive.ts)
 │  └─ p0/         P0 채널 MCP 서버와 자체 테스트(선택 어댑터)
+├─ plugin/agentlink/  Claude Code 플러그인(매니페스트, bin, 번들 dist)
+├─ .claude-plugin/    플러그인 마켓플레이스 정의
+├─ scripts/           build-plugin.mjs(번들 빌드)
 └─ docs/
    ├─ RFP.md        요구사항 정의서
    ├─ LOCAL-API.md  로컬 API 명세
    ├─ LAN.md        LAN 연결 가이드
+   ├─ PLUGIN.md     플러그인 설치
    ├─ ACL.md        ACL 규칙
    ├─ SDK.md        SDK와 새 에이전트 붙이기
    └─ P0.md         P0 검증 결과

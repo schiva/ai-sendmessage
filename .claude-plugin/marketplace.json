@@ -1,0 +1,15 @@
+{
+  "name": "agentlink-marketplace",
+  "owner": { "name": "AI_SendMessage project" },
+  "description": "Marketplace for the AgentLink plugin (agent-to-agent messaging on one PC and across a LAN).",
+  "plugins": [
+    {
+      "name": "agentlink",
+      "source": "./plugin/agentlink",
+      "description": "Lets Claude Code sessions exchange messages with other AI agents on this PC and on other PCs of the LAN.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "tags": ["agents", "messaging", "lan"]
+    }
+  ]
+}

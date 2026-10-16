@@ -1,0 +1,542 @@
+// LAN peering: TLS WebSocket links to the hosts listed in peers.json (RFP section 4.1, 6, 8).
+//   - every link is a TLS connection; the dialer pins the peer certificate fingerprint (S-02)
+//   - the dialed host authenticates the caller with a shared token and the peers.json allow list (S-01, S-02)
+//   - messages are stored first (outbox) and sent at least once; the receiver deduplicates by id (F-06, F-07)
+import https from 'node:https'
+import { timingSafeEqual } from 'node:crypto'
+import { WebSocket, WebSocketServer } from 'ws'
+import type { RawData } from 'ws'
+import type { Config } from './config.ts'
+import type { Core } from './core.ts'
+import { ApiError, NAME_RE, REF_RE } from './protocol.ts'
+import type { ErrorCode } from './protocol.ts'
+import type { PeerEntry, PeersConfig } from './peers-config.ts'
+import type { HostStatus, OutFrame, RemoteAgent, RemoteGateway } from './remote.ts'
+import type { Store } from './store.ts'
+import { displayFingerprint, normalizeFingerprint } from './tls.ts'
+import type { TlsMaterial } from './tls.ts'
+
+const MAX_FRAME = 512 * 1024
+const HANDSHAKE_MS = 5_000
+const MAX_REMOTE_AGENTS = 200
+const KNOWN_CODES = new Set<string>([
+  'BAD_REQUEST',
+  'UNAUTHORIZED',
+  'NOT_REGISTERED',
+  'UNKNOWN_AGENT',
+  'AMBIGUOUS_NAME',
+  'UNKNOWN_HOST',
+  'TOO_LARGE',
+  'RATE_LIMITED',
+  'FORBIDDEN',
+  'LOOP_DETECTED',
+  'INTERNAL',
+])
+
+type Initiator = 'self' | 'peer'
+
+interface Link {
+  host: string
+  ws: WebSocket
+  initiator: Initiator
+  since: number
+  alive: boolean
+  agents: RemoteAgent[]
+  pingTimer: NodeJS.Timeout
+}
+
+interface Dialer {
+  peer: PeerEntry
+  stopped: boolean
+  timer: NodeJS.Timeout | undefined
+  backoff: number
+  ws: WebSocket | undefined
+  lastError: string | null
+}
+
+interface Pending {
+  resolve: () => void
+  reject: (e: Error) => void
+}
+
+function tokenMatches(given: unknown, expected: string): boolean {
+  if (typeof given !== 'string') return false
+  const a = Buffer.from(given)
+  const b = Buffer.from(expected)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+function parseFrame(data: RawData, isBinary: boolean): Record<string, unknown> | null {
+  if (isBinary) return null
+  try {
+    const f = JSON.parse(data.toString())
+    return typeof f === 'object' && f !== null && !Array.isArray(f) ? (f as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+function cleanAgents(raw: unknown): RemoteAgent[] {
+  if (!Array.isArray(raw)) return []
+  const out: RemoteAgent[] = []
+  for (const a of raw.slice(0, MAX_REMOTE_AGENTS)) {
+    if (typeof a !== 'object' || a === null) continue
+    const e = a as Record<string, unknown>
+    if (typeof e.name !== 'string' || !NAME_RE.test(e.name)) continue
+    if (typeof e.ref !== 'string' || !REF_RE.test(e.ref)) continue
+    const kind = typeof e.kind === 'string' && NAME_RE.test(e.kind) ? e.kind : 'generic'
+    const status = e.status === 'busy' || e.status === 'idle' ? e.status : 'offline'
+    out.push({
+      name: e.name,
+      ref: e.ref,
+      kind,
+      status,
+      cwd: typeof e.cwd === 'string' ? e.cwd.slice(0, 1024) : null,
+      unread: typeof e.unread === 'number' && Number.isFinite(e.unread) ? Math.max(0, Math.floor(e.unread)) : 0,
+      last_seen: typeof e.last_seen === 'number' && Number.isFinite(e.last_seen) ? Math.floor(e.last_seen) : 0,
+    })
+  }
+  return out
+}
+
+export class PeerManager implements RemoteGateway {
+  private core: Core
+  private store: Store
+  private cfg: Config
+  private tls: TlsMaterial
+  private selfHost: string
+  private log: (line: string) => void
+  private config: PeersConfig = { listen: null, peers: [], errors: [] }
+  private links = new Map<string, Link>()
+  private dialers = new Map<string, Dialer>()
+  private pending = new Map<string, Pending>()
+  private httpsServer: https.Server | null = null
+  private wss: WebSocketServer | null = null
+  private listening: { host: string; port: number } | null = null
+  private listenError: string | null = null
+  private directoryTimer: NodeJS.Timeout | null = null
+
+  constructor(opts: { core: Core; store: Store; cfg: Config; tls: TlsMaterial; selfHost: string; log: (line: string) => void }) {
+    this.core = opts.core
+    this.store = opts.store
+    this.cfg = opts.cfg
+    this.tls = opts.tls
+    this.selfHost = opts.selfHost
+    this.log = opts.log
+  }
+
+  // --- RemoteGateway ---------------------------------------------------------------
+
+  knownHost(host: string): boolean {
+    return this.config.peers.some(p => p.name === host)
+  }
+
+  directory(): Array<{ host: string; agents: RemoteAgent[] }> {
+    return [...this.links.values()].map(l => ({ host: l.host, agents: l.agents }))
+  }
+
+  hosts(): HostStatus[] {
+    return this.config.peers.map(p => {
+      const link = this.links.get(p.name)
+      return {
+        host: p.name,
+        link: link ? 'up' : 'down',
+        since: link ? Math.floor(link.since / 1000) : null,
+        queued: this.store.countOutbox(p.name),
+        error: link ? null : (this.dialers.get(p.name)?.lastError ?? null),
+      }
+    })
+  }
+
+  async send(host: string, frame: OutFrame, senderAgent: string, toDisplay: string): Promise<'stored' | 'queued_remote'> {
+    this.store.insertOutbox({
+      id: frame.id,
+      peer: host,
+      frame: JSON.stringify(frame),
+      sender_agent: senderAgent,
+      to_display: toDisplay,
+      created_ms: Date.now(),
+    })
+    const link = this.links.get(host)
+    if (!link) return 'queued_remote'
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(frame.id)
+        resolve('queued_remote')
+      }, this.cfg.ackWaitMs)
+      this.pending.set(frame.id, {
+        resolve: () => {
+          clearTimeout(timer)
+          resolve('stored')
+        },
+        reject: e => {
+          clearTimeout(timer)
+          reject(e)
+        },
+      })
+      try {
+        link.ws.send(JSON.stringify(frame))
+      } catch {
+        clearTimeout(timer)
+        this.pending.delete(frame.id)
+        resolve('queued_remote')
+      }
+    })
+  }
+
+  // --- configuration -----------------------------------------------------------------
+
+  status(): Record<string, unknown> {
+    return {
+      host: this.selfHost,
+      fingerprint: displayFingerprint(this.tls.fingerprint),
+      listening: this.listening,
+      listen_error: this.listenError,
+      config_errors: this.config.errors,
+      peers: this.hosts(),
+    }
+  }
+
+  async apply(next: PeersConfig): Promise<void> {
+    const prev = this.config
+    this.config = next
+
+    // Peers that disappeared or changed: drop their dialer and link.
+    for (const [name, d] of [...this.dialers]) {
+      const n = next.peers.find(p => p.name === name)
+      const same = n && n.dial && n.address === d.peer.address && n.port === d.peer.port && n.token === d.peer.token && n.fingerprint === d.peer.fingerprint
+      if (!same) this.stopDialer(name)
+    }
+    for (const [name, link] of [...this.links]) {
+      const before = prev.peers.find(p => p.name === name)
+      const n = next.peers.find(p => p.name === name)
+      if (!n || !before || n.token !== before.token) link.ws.close(1000, 'peer configuration changed')
+    }
+    for (const p of next.peers) if (p.dial && !this.dialers.has(p.name)) this.startDialer(p)
+
+    // Listener.
+    const want = next.listen
+    const have = this.listening
+    if (!want || !have || want.host !== have.host || want.port !== have.port) {
+      await this.stopListener()
+      if (want) await this.startListener(want)
+    }
+
+    if (next.peers.length > 0 && !this.directoryTimer) {
+      this.directoryTimer = setInterval(() => this.broadcastDirectory(), this.cfg.directoryMs)
+      this.directoryTimer.unref()
+    }
+    if (next.peers.length === 0 && this.directoryTimer) {
+      clearInterval(this.directoryTimer)
+      this.directoryTimer = null
+    }
+    for (const e of next.errors) this.log(`peers.json: ${e}`)
+  }
+
+  async stop(): Promise<void> {
+    if (this.directoryTimer) clearInterval(this.directoryTimer)
+    this.directoryTimer = null
+    for (const name of [...this.dialers.keys()]) this.stopDialer(name)
+    for (const l of this.links.values()) l.ws.terminate()
+    await this.stopListener()
+  }
+
+  /** Called periodically by the daemon: expires undeliverable messages. */
+  sweep(): void {
+    const expired = this.store.outboxExpired(Date.now() - this.cfg.outboxTtlMs)
+    for (const row of expired) {
+      this.store.deleteOutbox(row.id)
+      this.core.deliverNotice(row.sender_agent, `Message to ${row.to_display} could not be delivered within ${Math.round(this.cfg.outboxTtlMs / 3_600_000)}h and was dropped.`)
+    }
+  }
+
+  // --- listener (inbound links) ------------------------------------------------------------
+
+  private startListener(l: { host: string; port: number }): Promise<void> {
+    return new Promise(resolve => {
+      const server = https.createServer({ key: this.tls.key, cert: this.tls.cert, minVersion: 'TLSv1.2' })
+      const wss = new WebSocketServer({ server, maxPayload: MAX_FRAME })
+      wss.on('connection', ws => this.bind(ws, 'peer', null))
+      server.once('error', e => {
+        this.listenError = `${(e as NodeJS.ErrnoException).code ?? 'error'}: ${e.message}`
+        this.log(`listener ${l.host}:${l.port} failed: ${this.listenError}`)
+        wss.close()
+        resolve()
+      })
+      server.listen(l.port, l.host, () => {
+        this.httpsServer = server
+        this.wss = wss
+        this.listening = { host: l.host, port: (server.address() as { port: number }).port }
+        this.listenError = null
+        this.log(`listening for peers on ${l.host}:${this.listening.port}`)
+        resolve()
+      })
+    })
+  }
+
+  private stopListener(): Promise<void> {
+    const server = this.httpsServer
+    const wss = this.wss
+    this.httpsServer = null
+    this.wss = null
+    this.listening = null
+    if (!server || !wss) return Promise.resolve()
+    for (const c of wss.clients) c.terminate()
+    return new Promise(resolve => wss.close(() => server.close(() => resolve())))
+  }
+
+  // --- dialers (outbound links) ---------------------------------------------------------------
+
+  /** The link initiated by the host with the smaller name is the one both sides keep. */
+  private winnerInitiator(host: string): Initiator {
+    return this.selfHost < host ? 'self' : 'peer'
+  }
+
+  private startDialer(peer: PeerEntry): void {
+    const d: Dialer = { peer, stopped: false, timer: undefined, backoff: this.cfg.peerReconnectMinMs, ws: undefined, lastError: null }
+    this.dialers.set(peer.name, d)
+    this.attempt(d)
+  }
+
+  private stopDialer(name: string): void {
+    const d = this.dialers.get(name)
+    if (!d) return
+    d.stopped = true
+    if (d.timer) clearTimeout(d.timer)
+    try {
+      d.ws?.terminate()
+    } catch {
+      // already closed
+    }
+    this.dialers.delete(name)
+  }
+
+  private schedule(d: Dialer, ms: number): void {
+    if (d.stopped) return
+    d.timer = setTimeout(() => this.attempt(d), ms)
+    d.timer.unref()
+  }
+
+  private attempt(d: Dialer): void {
+    if (d.stopped) return
+    const existing = this.links.get(d.peer.name)
+    if (existing && existing.initiator === this.winnerInitiator(d.peer.name)) {
+      this.schedule(d, this.cfg.peerReconnectMinMs)
+      return
+    }
+    const { peer } = d
+    const ws = new WebSocket(`wss://${peer.address}:${peer.port}`, {
+      rejectUnauthorized: false, // self-signed: trust comes from the pinned fingerprint below
+      handshakeTimeout: HANDSHAKE_MS,
+      maxPayload: MAX_FRAME,
+      minVersion: 'TLSv1.2',
+    })
+    d.ws = ws
+    let opened = false
+    ws.on('open', () => {
+      opened = true
+      const sock = (ws as unknown as { _socket?: { getPeerCertificate?: () => { fingerprint256?: string } } })._socket
+      const got = normalizeFingerprint(sock?.getPeerCertificate?.().fingerprint256 ?? '')
+      if (got !== peer.fingerprint) {
+        d.lastError = `certificate fingerprint mismatch (pinned ${displayFingerprint(peer.fingerprint)}, got ${got ? displayFingerprint(got) : 'none'})`
+        this.log(`peer ${peer.name}: ${d.lastError}`)
+        ws.terminate()
+        return
+      }
+      ws.send(JSON.stringify({ t: 'hello', v: 1, host: this.selfHost, token: peer.token }))
+      this.bind(ws, 'self', peer.name, () => {
+        d.backoff = this.cfg.peerReconnectMinMs
+        d.lastError = null
+      }, msg => {
+        d.lastError = msg
+      })
+    })
+    ws.on('error', e => {
+      if (!opened || !d.lastError) d.lastError = e.message
+    })
+    ws.on('close', () => {
+      if (d.ws === ws) d.ws = undefined
+      this.schedule(d, d.backoff)
+      d.backoff = Math.min(d.backoff * 2, this.cfg.peerReconnectMaxMs)
+    })
+  }
+
+  // --- one socket, both directions -----------------------------------------------------------------
+
+  private bind(ws: WebSocket, initiator: Initiator, expectHost: string | null, onUp?: () => void, onProblem?: (msg: string) => void): void {
+    let host: string | null = null
+    const authTimer = setTimeout(() => ws.terminate(), HANDSHAKE_MS)
+    ws.on('close', () => clearTimeout(authTimer))
+    ws.on('error', () => {})
+
+    ws.on('message', (data, isBinary) => {
+      const f = parseFrame(data, isBinary)
+      if (!f) {
+        ws.terminate()
+        return
+      }
+
+      if (host === null) {
+        // Handshake phase.
+        if (initiator === 'peer') {
+          const peer = f.t === 'hello' && f.v === 1 && typeof f.host === 'string' ? this.config.peers.find(p => p.name === f.host) : undefined
+          if (!peer || !tokenMatches(f.token, peer.token)) {
+            this.log(`rejected inbound peer "${String(f.host).slice(0, 64)}": ${peer ? 'bad token' : 'not in peers.json'}`)
+            ws.send(JSON.stringify({ t: 'error', code: 'UNAUTHORIZED' }))
+            ws.close(1008, 'unauthorized')
+            return
+          }
+          ws.send(JSON.stringify({ t: 'welcome', v: 1, host: this.selfHost }))
+          host = peer.name
+        } else {
+          if (f.t === 'error') {
+            onProblem?.(`peer refused the connection: ${String(f.code)}`)
+            ws.terminate()
+            return
+          }
+          if (f.t !== 'welcome' || f.host !== expectHost) {
+            onProblem?.('unexpected handshake reply')
+            ws.terminate()
+            return
+          }
+          host = expectHost
+        }
+        clearTimeout(authTimer)
+        if (!this.establish(host as string, ws, initiator)) return
+        onUp?.()
+        return
+      }
+
+      const link = this.links.get(host)
+      if (!link || link.ws !== ws) return
+      link.alive = true
+      switch (f.t) {
+        case 'agents':
+          link.agents = cleanAgents(f.agents)
+          break
+        case 'msg':
+        case 'watch':
+        case 'notice':
+          this.onTransfer(link, f)
+          break
+        case 'ack':
+          this.onAck(host, f)
+          break
+        default:
+          break
+      }
+    })
+  }
+
+  private establish(host: string, ws: WebSocket, initiator: Initiator): boolean {
+    const existing = this.links.get(host)
+    if (existing) {
+      if (initiator === this.winnerInitiator(host)) {
+        existing.ws.close(1000, 'replaced')
+        this.dropLink(existing)
+      } else {
+        ws.close(1000, 'duplicate link')
+        return false
+      }
+    }
+    const link: Link = {
+      host,
+      ws,
+      initiator,
+      since: Date.now(),
+      alive: true,
+      agents: [],
+      pingTimer: setInterval(() => {
+        if (!link.alive) {
+          ws.terminate()
+          return
+        }
+        link.alive = false
+        try {
+          ws.ping()
+        } catch {
+          ws.terminate()
+        }
+      }, this.cfg.peerPingMs),
+    }
+    link.pingTimer.unref()
+    ws.on('pong', () => (link.alive = true))
+    ws.on('close', () => this.dropLink(link))
+    this.links.set(host, link)
+    this.log(`link to ${host} is up (${initiator === 'self' ? 'outbound' : 'inbound'})`)
+    this.sendDirectory(link)
+    this.flush(link)
+    return true
+  }
+
+  private dropLink(link: Link): void {
+    clearInterval(link.pingTimer)
+    if (this.links.get(link.host) === link) {
+      this.links.delete(link.host)
+      this.log(`link to ${link.host} is down`)
+    }
+  }
+
+  // --- frames ------------------------------------------------------------------------------------------
+
+  private sendDirectory(link: Link): void {
+    try {
+      link.ws.send(JSON.stringify({ t: 'agents', agents: this.core.localDirectory() }))
+    } catch {
+      // the close handler cleans up
+    }
+  }
+
+  private broadcastDirectory(): void {
+    for (const l of this.links.values()) this.sendDirectory(l)
+  }
+
+  private flush(link: Link): void {
+    for (const row of this.store.outboxForPeer(link.host)) {
+      try {
+        link.ws.send(row.frame)
+      } catch {
+        return
+      }
+    }
+  }
+
+  private onTransfer(link: Link, f: Record<string, unknown>): void {
+    const id = typeof f.id === 'string' ? f.id.slice(0, 64) : ''
+    let reply: Record<string, unknown>
+    try {
+      if (f.t === 'msg') this.core.receiveRemote(link.host, f)
+      else if (f.t === 'watch') this.core.receiveWatch(link.host, f)
+      else this.core.receiveNotice(link.host, f)
+      reply = { t: 'ack', id, status: 'stored' }
+    } catch (e) {
+      if (e instanceof ApiError) reply = { t: 'ack', id, status: 'error', code: e.code, message: e.message.slice(0, 300) }
+      else {
+        this.log(`error while receiving from ${link.host}: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`)
+        reply = { t: 'ack', id, status: 'error', code: 'INTERNAL', message: 'internal error' }
+      }
+    }
+    try {
+      link.ws.send(JSON.stringify(reply))
+    } catch {
+      // the sender will retransmit and we will deduplicate
+    }
+  }
+
+  private onAck(host: string, f: Record<string, unknown>): void {
+    const id = typeof f.id === 'string' ? f.id : ''
+    const row = this.store.getOutbox(id)
+    if (!row || row.peer !== host) return
+    this.store.deleteOutbox(id)
+    const waiter = this.pending.get(id)
+    this.pending.delete(id)
+    if (f.status === 'stored') {
+      waiter?.resolve()
+      return
+    }
+    const code = (typeof f.code === 'string' && KNOWN_CODES.has(f.code) ? f.code : 'INTERNAL') as ErrorCode
+    const message = typeof f.message === 'string' ? f.message.slice(0, 300) : 'delivery failed'
+    if (waiter) waiter.reject(new ApiError(code, `${message} (reported by ${host})`))
+    else this.core.deliverNotice(row.sender_agent, `Message to ${row.to_display} could not be delivered: ${code}: ${message}`)
+  }
+}

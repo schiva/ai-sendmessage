@@ -1,0 +1,56 @@
+import os from 'node:os'
+import path from 'node:path'
+
+export interface Config {
+  leaseMs: number
+  sweepMs: number
+  rateBurst: number
+  ratePerMin: number
+  dupWindowMs: number
+  peerReconnectMinMs: number
+  peerReconnectMaxMs: number
+  peerPingMs: number
+  ackWaitMs: number
+  outboxTtlMs: number
+  directoryMs: number
+}
+
+function num(name: string, def: number): number {
+  const v = Number(process.env[name])
+  return Number.isFinite(v) && v > 0 ? v : def
+}
+
+function sanitize(s: string): string {
+  return s.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) || 'user'
+}
+
+export function homeDir(): string {
+  if (process.env.AGENTLINK_HOME) return process.env.AGENTLINK_HOME
+  const base = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
+  return path.join(base, 'AgentLink')
+}
+
+export function pipePath(): string {
+  if (process.env.AGENTLINK_PIPE) return process.env.AGENTLINK_PIPE
+  return `\\\\.\\pipe\\agentlink-${sanitize(os.userInfo().username)}`
+}
+
+export function hostName(): string {
+  return sanitize(process.env.AGENTLINK_HOST ?? os.hostname()).toLowerCase()
+}
+
+export function loadConfig(): Config {
+  return {
+    leaseMs: num('AGENTLINK_LEASE_MS', 30_000),
+    sweepMs: num('AGENTLINK_SWEEP_MS', 5_000),
+    rateBurst: num('AGENTLINK_RATE_BURST', 10),
+    ratePerMin: num('AGENTLINK_RATE_PER_MIN', 60),
+    dupWindowMs: num('AGENTLINK_DUP_WINDOW_MS', 2_000),
+    peerReconnectMinMs: num('AGENTLINK_PEER_RECONNECT_MIN_MS', 1_000),
+    peerReconnectMaxMs: num('AGENTLINK_PEER_RECONNECT_MAX_MS', 30_000),
+    peerPingMs: num('AGENTLINK_PEER_PING_MS', 10_000),
+    ackWaitMs: num('AGENTLINK_ACK_WAIT_MS', 2_000),
+    outboxTtlMs: num('AGENTLINK_OUTBOX_TTL_MS', 24 * 60 * 60 * 1000),
+    directoryMs: num('AGENTLINK_DIRECTORY_MS', 3_000),
+  }
+}
