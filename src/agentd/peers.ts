@@ -307,7 +307,7 @@ export class PeerManager implements RemoteGateway {
     let address = opts.address
     if (!address) address = l && !isWildcard(l.host) && l.host !== '127.0.0.1' ? l.host : lanAddresses()[0]
     if (!address) throw new ApiError('BAD_REQUEST', 'no LAN address of this PC found; pass --address <IP of this PC>')
-    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, 10), 3600)
+    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, this.cfg.pairMinTtlS), 3600)
 
     if (this.pairing) {
       clearTimeout(this.pairing.timer)
@@ -447,7 +447,16 @@ export class PeerManager implements RemoteGateway {
           e => finish(new ApiError('INTERNAL', String(e))),
         )
       })
-      ws.on('error', e => finish(new ApiError('INTERNAL', `cannot reach ${c.address}:${c.port}: ${e.message}. Is TCP ${c.port} open in the firewall of that PC?`)))
+      ws.on('error', e => {
+        const code = (e as NodeJS.ErrnoException).code
+        // The PC answered with "nothing is listening": its pairing is over (code expired or cancelled). No answer at all points at the
+        // firewall or at a wrong address.
+        const hint =
+          code === 'ECONNREFUSED'
+            ? `nothing is waiting for a pairing there: the code has probably expired or was cancelled. Run "agentctl pair" again on that PC.`
+            : `Is TCP ${c.port} allowed in the Windows Firewall of that PC (see docs/LAN.md, "Firewall rule"), and is ${c.address} the right address?`
+        finish(new ApiError('INTERNAL', `cannot reach ${c.address}:${c.port}: ${e.message}. ${hint}`))
+      })
       ws.on('close', () => finish(new ApiError('INTERNAL', 'the other PC closed the connection before pairing finished')))
     })
   }
