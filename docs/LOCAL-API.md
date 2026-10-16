@@ -174,6 +174,14 @@ hook과 MCP 서버는 모두 `CLAUDE_CODE_SESSION_ID` 환경변수를 받고, �
 - **`pair`**: 알리는 주소는 사설 대역과 실제 어댑터를 우선해서 고르고, 다른 후보는 `pair_start` 결과의 `other_addresses`로 돌려준다. 하트비트와 재연결은 데몬을 띄우지 않는다(클라이언트 쪽, 도구 호출과 훅만 데몬을 띄운다).
 - 환경 변수: `AGENTLINK_LISTEN_RETRY_MS`(15000), `AGENTLINK_RETRY_BASE_MS`(2000), `AGENTLINK_RETRY_MAX_ATTEMPTS`(8), `AGENTLINK_SHARE_FULL_CWD`(끔). 유휴 감시기와 훅의 환경 변수는 [INSTALL.md](../INSTALL.md)에 있다.
 
+### 7.10 0.4.0에서 바뀐 것
+- **outbox 한도**: 한 호스트로 쌓이는 메시지가 `AGENTLINK_OUTBOX_MAX`(500)건이나 `AGENTLINK_OUTBOX_MAX_BYTES`(16 MiB)를 넘으면 `send`가 `RATE_LIMITED`로 실패한다. idle 알림 프레임은 세지 않는다.
+- **디렉터리 전송**: 에이전트 목록(`agents` 프레임)은 바뀌었을 때(`last_seen`은 비교하지 않는다)와 `AGENTLINK_DIRECTORY_KEEPALIVE_MS`(30000)마다 보낸다.
+- **인증 전 연결 한도**: `AGENTLINK_MAX_PREAUTH_PER_IP`(4), `AGENTLINK_MAX_PREAUTH`(32). 넘으면 가장 오래된 연결을 닫는다.
+- **`pair`**: `AGENTLINK_PAIR_MIN_TTL_S`(10)로 코드의 최소 유효 시간을 줄일 수 있다(시험용). 만료된 코드를 입력하면 `INTERNAL`로 "expired or was cancelled"가 온다.
+- **`agentd.log`**: 데몬이 DB 스키마를 올렸으면 `database upgraded from schema <n> to <m>` 한 줄을 남긴다.
+- **ACL**: `agentctl acl init`(클라이언트 쪽 명령, 새 데몬 메서드 없음)이 기본 거부 `acl.json`을 만든다. [ACL.md](ACL.md).
+
 ## 6. 한도(초기값)
 
 | 항목 | 값 |

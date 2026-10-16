@@ -8,7 +8,7 @@
   - 오프라인 큐: 링크가 끊긴 동안 보낸 메시지는 `queued_remote`로 쌓였다가 링크가 돌아온 직후 정확히 1번 전달됐다(중복 없음).
   - 쉬는 세션 깨우기(`agentctl wake`)가 양방향으로 동작했다.
   - `agentctl pair`: 데스크톱의 실제 데몬이 코드를 만들고(이미 수신 중인 7420 포트와 기존 방화벽 규칙 사용), 노트북의 별도 임시 데몬(다른 호스트 이름, HOME, 파이프)이 코드를 입력했다. 양쪽이 서로를 등록하고(수신 쪽은 `dial: false`, 기존 피어 항목은 그대로) 링크가 `up`이 됐으며, 메시지가 양방향으로 전달됐다. 같은 코드를 다시 쓰면 `the other PC refused the code`로 거부됐다. 시험 뒤 두 쪽 모두 원래 상태로 되돌렸다.
-- 실제 PC에서 확인하지 않은 것: 방화벽 규칙이 없을 때의 동작(`pair`가 막혔을 때의 안내 포함), 코드 만료, 큐 24시간 만료와 `delivery_notice`, 세 대 이상의 구성.
+- 실제 PC에서 확인하지 않은 것: 방화벽 규칙이 없을 때의 동작(`pair`가 막혔을 때의 안내 포함), 큐 24시간 만료와 `delivery_notice`, 세 대 이상의 구성. (코드 만료, outbox 한도, 인증 전 연결 한도는 한 PC의 여러 데몬으로 검증했다.)
 
 ## 1. 동작 방식
 
@@ -23,6 +23,10 @@
 - 큐 보관 기간은 24시간이다. 넘으면 버리고 알림을 남긴다.
 - 상대가 속도 제한이나 가득 찬 inbox(`RATE_LIMITED`)로 잠깐 거부한 메시지는 지워지지 않는다. 2초부터 두 배씩(최대 1분) 다시 보내고, 호출자는 `queued_remote`를 받는다. 8번 거부되면 포기하고 보낸 에이전트에게 알린다. 다른 오류(없는 에이전트, 이름 모호, 너무 큼 등)는 바로 최종이다.
 - 수신 포트를 열지 못하면(포트가 사용 중, `listen.host`의 IP가 없음) 데몬은 계속 뜬 채로 15초마다 다시 연다. `agentctl peers`의 `listening` 줄에 오류와 "trying again in Ns"가 보인다. DHCP로 IP가 바뀌었다면 `peers.json`의 `listen.host`를 새 IP로 고치고 `peers reload`한다.
+- 한 호스트가 오래 닿지 않을 때 그 호스트로 쌓이는 outbox는 메시지 500건이나 16 MiB에서 멈춘다(`AGENTLINK_OUTBOX_MAX`, `AGENTLINK_OUTBOX_MAX_BYTES`). 넘으면 `send`가 바로 `RATE_LIMITED`로 실패하고 이유를 알려 주며, 이미 쌓인 메시지는 그대로 남았다가 호스트가 돌아오면 전달된다.
+- 에이전트 목록은 바뀌었을 때, 그리고 30초마다(`AGENTLINK_DIRECTORY_KEEPALIVE_MS`) 피어에 보낸다. 그래서 다른 PC 에이전트의 `last_seen` 표시는 최대 30초 늦을 수 있다.
+- 아직 누구인지 밝히지 않은 연결은 주소마다 4개(`AGENTLINK_MAX_PREAUTH_PER_IP`), 전체 32개(`AGENTLINK_MAX_PREAUTH`)로 제한한다. 한도에 닿으면 가장 오래된 연결을 닫으므로 지금 접속하는 정상 피어는 거부되지 않는다.
+- `agentctl pair`의 코드는 만료되거나 취소되면 포트도 닫는다. 그 뒤에 코드를 입력하면 "nothing is waiting for a pairing there: the code has probably expired or was cancelled"가 나온다(방화벽 안내는 응답이 아예 없을 때만 나온다).
 - 다른 PC에는 에이전트의 작업 폴더 전체 경로가 아니라 폴더 이름만 알린다(같은 PC에서는 전체 경로). 전체 경로를 알리려면 환경 변수 `AGENTLINK_SHARE_FULL_CWD=1`.
 
 ## 2. 가장 쉬운 방법: `agentctl pair`
@@ -39,9 +43,21 @@ Windows 방화벽은 들어오는 연결을 기본으로 막는다. 상대 PC가
   New-NetFirewallRule -DisplayName "AgentLink" -Direction Inbound -Protocol TCP -LocalPort 7420 -RemoteAddress <상대 PC의 IP> -Action Allow
   ```
   상대가 여러 대이거나 IP가 바뀌면 `-RemoteAddress LocalSubnet`(같은 서브넷 전체)을 쓴다. `--port`나 `listen.port`로 7420이 아닌 포트를 쓰면 그 포트로 규칙을 만든다.
-- **확인하기:** `Get-NetFirewallRule -DisplayName "AgentLink*" | Get-NetFirewallPortFilter`
+- **확인하기:** 규칙의 포트와 허용 주소가 맞는지 둘 다 본다.
+  ```
+  Get-NetFirewallRule -DisplayName "AgentLink*" | Get-NetFirewallPortFilter
+  Get-NetFirewallRule -DisplayName "AgentLink*" | Get-NetFirewallAddressFilter
+  ```
 - **지우기:** `Remove-NetFirewallRule -DisplayName "AgentLink"`
 - `agentctl pair`는 이름이 `AgentLink`로 시작하는 규칙이 하나도 없으면 위 명령(`LocalSubnet` 형태)을 출력한다. 규칙의 존재만 보고, 포트와 허용 주소가 맞는지는 검사하지 않는다.
+- 규칙은 프로필(도메인, 개인, 공개)을 지정하지 않으면 모든 프로필에 적용된다. `-Profile Private`로 만들면 네트워크가 "공개"일 때는 적용되지 않으니, 지금 연결의 종류를 `Get-NetConnectionProfile`로 보고 정한다.
+
+**주의: Windows가 `node.exe`에 넓은 허용 규칙을 이미 만들어 두었을 수 있다.** node가 처음 포트를 열 때 Windows가 "이 앱을 허용할까요?" 대화상자를 띄우는데, 허용을 누르면 `Node.js JavaScript Runtime`이라는 규칙이 생긴다. 이 규칙은 프로그램이 `node.exe`이면 **모든 포트, 모든 원격 주소**를 허용하므로, 위에서 만든 AgentLink 규칙의 "상대 IP만"이나 `LocalSubnet` 제한이 아무 효과가 없어지고 7420이 같은 네트워크의 모든 PC에 열린다. (연결 자체는 인증서 지문 고정과 토큰 인증이 계속 막는다. 열린 포트는 접속 시도를 받을 수 있다는 뜻이다.) 확인:
+  ```
+  Get-NetFirewallRule -Direction Inbound -Enabled True -Action Allow | Where-Object DisplayName -like "Node*" | ForEach-Object { $_.DisplayName; $_.Profile; ($_ | Get-NetFirewallApplicationFilter).Program; ($_ | Get-NetFirewallPortFilter).LocalPort; ($_ | Get-NetFirewallAddressFilter).RemoteAddress }
+  ```
+  `LocalPort`와 `RemoteAddress`가 둘 다 `Any`이면 넓은 규칙이다. 처음 실행할 때 그 대화상자가 뜨면 허용하지 말고 위의 AgentLink 규칙만 만든다. 이미 있다면 지우거나 끌지 여부는 사용자가 정한다. 같은 `node.exe`로 다른 서버(개발 서버 등)를 여는 프로그램도 그 규칙에 기대고 있을 수 있다(`Disable-NetFirewallRule -DisplayName "Node.js JavaScript Runtime"`, 관리자 PowerShell, `Enable-NetFirewallRule`로 되돌린다). 이 저장소의 두 PC(데스크톱과 노트북)에서 실제로 이 규칙이 확인되었다.
+- 접속하는 쪽 PC에는 AgentLink 규칙이 필요 없다. 노트북(접속하는 쪽)에 AgentLink 규칙이 없는 채로 데스크톱 링크가 `up`인 것을 확인했다.
 - 상대 IP 하나만 허용한 규칙으로 실제 두 PC 검증을 했다. 규칙이 없을 때의 정확한 증상은 실제 PC에서 확인하지 않았다(예상: 시간 초과나 `ECONNREFUSED`, 문제 해결 표 참고).
 
 ### 순서

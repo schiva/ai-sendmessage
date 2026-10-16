@@ -21,7 +21,7 @@
 - 패턴은 `이름@호스트`다. 이름과 호스트 각각 `*`를 쓸 수 있고, `*` 하나는 모든 에이전트다.
 - 이름만 쓰면 `이름@이 PC`로 해석한다. 호스트는 대소문자를 구분하지 않는다.
 - **위에서부터 처음 맞는 규칙이 결정한다.** 맞는 규칙이 없으면 `default`(생략하면 `allow`)를 따른다.
-- 허용 목록 방식으로 쓰려면 `"default": "deny"`로 두고 `allow` 규칙만 적는다.
+- 허용 목록 방식으로 쓰려면 `"default": "deny"`로 두고 `allow` 규칙만 적는다. 아래 "시작 파일 만들기"가 그 초안을 만들어 준다.
 
 ## 2. 어디서 검사하는가
 
@@ -53,6 +53,34 @@ npm run agentctl -- acl                         # 현재 규칙과 오류 보기
 npm run agentctl -- acl reload                  # acl.json 다시 읽기
 npm run agentctl -- acl check alice@pc-a bob@pc-b   # 허용 여부와 근거 규칙 확인(허용이면 종료 코드 0, 거부면 1)
 ```
+
+### 시작 파일 만들기: `acl init`
+
+`acl.json`이 없으면 모두 허용이다. PC가 둘이면 괜찮지만 셋 이상이거나 PC마다 쓰는 사람이 다르면 느슨하다. 기본을 거부로 바꾼 초안을 만들려면:
+
+```
+agentctl acl init --print   # 만들 내용만 보기(아무것도 쓰지 않음)
+agentctl acl init           # acl.json을 쓰고 바로 다시 읽기
+agentctl acl init --force   # 이미 있는 acl.json을 바꾸기(옛 파일은 acl.json.bak으로 남는다)
+```
+
+`peers.json`에 있는 호스트가 `pc-b`이고 이 PC가 `pc-a`라면 만들어지는 파일은 다음과 같다.
+
+```json
+{
+  "default": "deny",
+  "rules": [
+    { "from": "*@pc-a", "to": "*@pc-a", "action": "allow" },
+    { "from": "*@pc-b", "to": "*@pc-a", "action": "allow" },
+    { "from": "*@pc-a", "to": "*@pc-b", "action": "allow" }
+  ]
+}
+```
+
+- 이 PC의 에이전트끼리, 그리고 `peers.json`의 각 호스트와 양방향만 허용한다. 목록에 없는 호스트와 두 피어 사이는 거부한다.
+- **나중에 `agentctl pair`로 PC를 더하면 그 PC는 규칙이 없어서 거부된다.** `acl init --force`를 다시 실행하거나 규칙을 직접 더하고 `acl reload`한다.
+- 이미 있는 `acl.json`은 `--force` 없이는 바꾸지 않는다.
+- 이 초안은 사람 단위나 에이전트 이름 단위로 나누지 않는다. 더 좁히려면 `*` 대신 이름을 쓴다.
 
 ## 5. 한계
 
