@@ -11,6 +11,7 @@
 | 구성 | 내용 |
 |---|---|
 | hooks | `SessionStart`(등록과 안내), `UserPromptSubmit`(busy 표시, 대기 메시지 주입), `PostToolUse`(작업 중 도착한 메시지 주입), `Stop`(대기 메시지가 있으면 이어 가기, 없으면 idle), `SessionEnd`(등록 해제). 모두 `node`를 exec 형식으로 실행한다. |
+| 유휴 감시기 | 훅은 입력, 도구 호출, 턴 종료 때만 돌아서 쉬는 세션은 메시지를 못 본다. 그래서 SessionStart가 `agentctl wake --agent <id>`를 백그라운드 명령으로 띄우라고 안내한다. 감시기는 메시지를 읽지도 출력하지도 않고 기다리다가, 메시지가 오면 한 줄을 남기고 종료한다. 종료가 새 턴을 시작시키고, Claude는 `read_inbox`로 읽은 뒤 감시기를 다시 띄운다. 같은 순간에 도착한 메시지는 2초 동안 모아 한 번에 깨운다. 10분에 10회까지만 깨운다. 감시기가 없으면 Stop 훅이 세션이 쉬기 전에 시작을 요구하고(연속 2회까지, 한 턴에 한 번), 두 번째 프롬프트부터는 프롬프트 훅이 상기시킨다. Claude 프로세스가 사라지면(비정상 종료 포함) 감시기는 조용히 끝나고, 12시간 뒤에도 끝난다. `AGENTLINK_NO_WAKE=1`로 끈다. |
 | MCP 서버 | `agentlink`: `send_message`, `list_agents`, `read_inbox`, `ack_messages`. 도구 이름은 `mcp__plugin_agentlink_agentlink__*`. |
 | `bin/agentctl` | 플러그인이 켜져 있으면 Claude의 Bash 도구 PATH에 올라간다. `agentctl list`, `agentctl peers`처럼 바로 쓸 수 있다. |
 

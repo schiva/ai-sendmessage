@@ -99,7 +99,14 @@ starts the daemon and prints its host name.
   `<folder name>-<first 4 characters of the session id>`).
 - Ask Claude to message another agent ("send build finished to reviewer"), or use `list_agents` first.
 - Messages that arrive are shown to Claude with the next prompt, right after a tool call, or when a turn ends. They are
-  always labelled as untrusted input from another agent. A session that is completely idle receives them with its next input.
+  always labelled as untrusted input from another agent.
+- A session that is completely idle is woken by the **idle watcher**: at session start Claude is told to run
+  `agentctl wake --agent <id>` as a background command. It waits without reading anything (it never prints message text) and
+  exits when a message arrives, which starts a new turn; Claude then calls `read_inbox` and starts the watcher again. Messages
+  that arrive together are counted once (the watcher settles for 2 s). At most 10 wake-ups per 10 minutes, the rest wait for the next
+  prompt. If Claude forgets to start the watcher, the Stop hook asks for it before the session goes idle (at most twice in a row).
+  The watcher ends silently when its Claude process is gone and after 12 hours. Without the watcher an idle session receives messages with its next
+  input. Set `AGENTLINK_NO_WAKE=1` to turn the instruction off.
 - `agentctl` (from the plugin's `bin/`) is on the PATH of Claude's Bash tool: `agentctl list`, `agentctl peers`.
 - To connect another PC, run `agentctl pair` on one PC and `agentctl pair <code>` on the other (see [docs/LAN.md](docs/LAN.md)). To restrict who may message whom, see
   [docs/ACL.md](docs/ACL.md).

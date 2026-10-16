@@ -1,8 +1,9 @@
 import { createRequire as __agentlinkCreateRequire } from 'node:module'; const require = __agentlinkCreateRequire(import.meta.url);
 
 // src/adapters/claude/hook.ts
-import fs2 from "node:fs";
-import path4 from "node:path";
+import fs3 from "node:fs";
+import path5 from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/agentd/config.ts
 import os from "node:os";
@@ -168,14 +169,37 @@ var Client = class _Client extends EventEmitter {
   }
 };
 
-// src/adapters/common/identity.ts
+// src/client/wake.ts
+import fs2 from "node:fs";
 import path3 from "node:path";
+var ALIVE_FRESH_MS = 9e4;
+function stateFile(agent) {
+  return path3.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.json`);
+}
+function readState(agent) {
+  try {
+    const s = JSON.parse(fs2.readFileSync(stateFile(agent), "utf8"));
+    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [] };
+  } catch {
+    return { pid: 0, ts: 0, wakes: [] };
+  }
+}
+function wakeAlive(agent, now = Date.now()) {
+  const s = readState(agent);
+  return s.pid !== 0 && now - s.ts < ALIVE_FRESH_MS;
+}
+function wakeCommand(agentctlFile, agent) {
+  return `node --no-warnings "${agentctlFile.replace(/\\/g, "/")}" wake --agent ${agent}`;
+}
+
+// src/adapters/common/identity.ts
+import path4 from "node:path";
 function clean(s) {
   return s.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 }
 function deriveIdentity(env, cwd) {
   const projectDir = env.CLAUDE_PROJECT_DIR || cwd;
-  const folder = clean(path3.basename(projectDir.replace(/[\\/]+$/, ""))) || "agent";
+  const folder = clean(path4.basename(projectDir.replace(/[\\/]+$/, ""))) || "agent";
   const sessionId = env.CLAUDE_CODE_SESSION_ID;
   const explicitName = env.AGENTLINK_NAME ? clean(env.AGENTLINK_NAME) : "";
   if (sessionId) {
@@ -220,6 +244,7 @@ var SERVER_INSTRUCTIONS = "AgentLink lets you exchange short text messages with 
 
 // src/adapters/claude/hook.ts
 var MAX_STOP_CONTINUES = 5;
+var MAX_WAKE_NAGS = 2;
 async function readStdin() {
   return new Promise((resolve) => {
     let buf = "";
@@ -234,20 +259,38 @@ async function readStdin() {
   });
 }
 function statePath(sessionId) {
-  return path4.join(homeDir(), "hook-state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+  return path5.join(homeDir(), "hook-state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
 }
-function readContinues(sessionId) {
+function readState2(sessionId) {
   try {
-    return Number(JSON.parse(fs2.readFileSync(statePath(sessionId), "utf8")).continues) || 0;
+    const s = JSON.parse(fs3.readFileSync(statePath(sessionId), "utf8"));
+    return { continues: Number(s.continues) || 0, prompts: Number(s.prompts) || 0, nags: Number(s.nags) || 0 };
   } catch {
-    return 0;
+    return { continues: 0, prompts: 0, nags: 0 };
   }
 }
-function writeContinues(sessionId, n) {
+function writeState(sessionId, patch) {
+  const next = { ...readState2(sessionId), ...patch };
   try {
-    fs2.mkdirSync(path4.dirname(statePath(sessionId)), { recursive: true });
-    fs2.writeFileSync(statePath(sessionId), JSON.stringify({ continues: n }));
+    fs3.mkdirSync(path5.dirname(statePath(sessionId)), { recursive: true });
+    fs3.writeFileSync(statePath(sessionId), JSON.stringify(next));
   } catch {
+  }
+  return next;
+}
+var readContinues = (sessionId) => readState2(sessionId).continues;
+var writeContinues = (sessionId, n) => void writeState(sessionId, { continues: n });
+var AGENTCTL = fileURLToPath2(new URL(import.meta.url.endsWith(".mjs") ? "./agentctl.mjs" : "../../client/agentctl.ts", import.meta.url));
+var wakeEnabled = () => process.env.AGENTLINK_NO_WAKE !== "1";
+function wakeInstruction(agent) {
+  return `To be woken when a message arrives while you are idle, start the watcher once as a background command (Bash with run_in_background): ${wakeCommand(AGENTCTL, agent)} When that command finishes, call read_inbox, handle the messages, and start the watcher again. It prints no message text.`;
+}
+async function waitWakeAlive(agent, ms) {
+  const end = Date.now() + ms;
+  for (; ; ) {
+    if (wakeAlive(agent)) return true;
+    if (Date.now() >= end) return false;
+    await new Promise((r) => setTimeout(r, 100));
   }
 }
 function emit(obj) {
@@ -282,19 +325,24 @@ async function main() {
     const agent = reg.agent;
     switch (event) {
       case "SessionStart": {
-        writeContinues(sessionId, 0);
+        writeState(sessionId, { continues: 0, prompts: 0, nags: 0 });
         const unread = reg.unread;
         additionalContext(
           "SessionStart",
-          `AgentLink is active: you are agent ${reg.address}. Use the agentlink MCP tools (list_agents, send_message, read_inbox) to talk to other agents.` + (unread > 0 ? ` You have ${unread} unread message(s); they will be shown with your next prompt.` : "")
+          `AgentLink is active: you are agent ${reg.address}. Use the agentlink MCP tools (list_agents, send_message, read_inbox) to talk to other agents.` + (unread > 0 ? ` You have ${unread} unread message(s); they will be shown with your next prompt.` : "") + (wakeEnabled() ? ` ${wakeInstruction(agent)}` : "")
         );
         break;
       }
       case "UserPromptSubmit": {
-        writeContinues(sessionId, 0);
+        const { prompts } = writeState(sessionId, { continues: 0, prompts: readState2(sessionId).prompts + 1 });
         await client.request("heartbeat", { agent, status: "busy" });
         const msgs = await takeAndAck(client, agent);
-        if (msgs.length > 0) additionalContext("UserPromptSubmit", renderMessages(msgs));
+        const remind = wakeEnabled() && prompts > 1 && !wakeAlive(agent);
+        const parts = [
+          msgs.length > 0 ? renderMessages(msgs) : "",
+          remind ? `AgentLink: no idle watcher is running, so messages that arrive while you are idle wait until the next prompt. ${wakeInstruction(agent)}` : ""
+        ].filter(Boolean);
+        if (parts.length > 0) additionalContext("UserPromptSubmit", parts.join("\n\n"));
         break;
       }
       case "PostToolUse": {
@@ -310,6 +358,16 @@ async function main() {
           if (msgs.length > 0) {
             writeContinues(sessionId, continues + 1);
             emit({ decision: "block", reason: renderMessages(msgs) });
+            break;
+          }
+        }
+        if (wakeEnabled() && !input.stop_hook_active) {
+          const { nags } = readState2(sessionId);
+          if (wakeAlive(agent) || nags < MAX_WAKE_NAGS && await waitWakeAlive(agent, 2e3)) {
+            if (nags > 0) writeState(sessionId, { nags: 0 });
+          } else if (nags < MAX_WAKE_NAGS) {
+            writeState(sessionId, { nags: nags + 1 });
+            emit({ decision: "block", reason: `AgentLink: no idle watcher is running, so messages that arrive while you are idle cannot wake you. Start it now, then you may finish your turn. ${wakeInstruction(agent)}` });
             break;
           }
         }
@@ -329,8 +387,8 @@ async function main() {
 }
 main().catch((e) => {
   try {
-    fs2.mkdirSync(homeDir(), { recursive: true });
-    fs2.appendFileSync(path4.join(homeDir(), "hook-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${process.argv[2]} ${String(e instanceof Error ? e.message : e)}
+    fs3.mkdirSync(homeDir(), { recursive: true });
+    fs3.appendFileSync(path5.join(homeDir(), "hook-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${process.argv[2]} ${String(e instanceof Error ? e.message : e)}
 `);
   } catch {
   }

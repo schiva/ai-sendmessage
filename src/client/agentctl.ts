@@ -1,7 +1,9 @@
 // agentctl: command line client for agentd (any agent that can run a shell can use it).
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { Client, ApiCallError } from './client.ts'
+import { findSessionPid, sessionAliveCheck, waitForWake, wakeCommand, wakeOptionsFromEnv } from './wake.ts'
 
 const USAGE = `agentctl - AgentLink command line client
 
@@ -21,6 +23,8 @@ Commands:
   status <busy|idle> set the agent status
   idle-notify <to>   ask for one notice when <to> becomes idle
   watch              stream incoming messages until interrupted
+  wake               wait, without reading anything, until a message is waiting, then print one line and exit.
+                     Run it as a background command in a Claude Code session so a message wakes the idle session.
   ping               start agentd if needed and print its info
   acl [reload]       show the ACL (who may send to whom); reload re-reads acl.json
   acl check <from> <to>  ask whether name@host may send to name@host
@@ -264,6 +268,25 @@ async function main(): Promise<void> {
       const r = (await client.request('notify_when_idle', { agent, target: rest[0] })) as { immediate: boolean }
       out(r, r.immediate ? 'target is already idle; notice queued' : 'subscribed')
       break
+    }
+    case 'wake': {
+      let first: Client | null = client
+      const r = await waitForWake(async () => {
+        const c = first ?? (await Client.connect())
+        first = null
+        return c
+      }, { ...wakeOptionsFromEnv(agent), isSessionAlive: sessionAliveCheck(findSessionPid()) })
+      if (r.reason === 'session-gone') return // the session was killed: there is nobody to tell
+      if (r.reason === 'message') {
+        const n = r.count
+        console.log(
+          `AgentLink: ${n} new message${n === 1 ? '' : 's'} arrived while this session was idle. Call read_inbox to read ${n === 1 ? 'it' : 'them'}, ` +
+            `then start the watcher again in the background: ${wakeCommand(fileURLToPath(import.meta.url), agent)}`,
+        )
+      } else {
+        console.log(`AgentLink: the watcher stopped after its time limit. Start it again if you still want to be woken: ${wakeCommand(fileURLToPath(import.meta.url), agent)}`)
+      }
+      return
     }
     case 'watch': {
       await client.request('subscribe', { agent, events: ['message', 'idle'] })

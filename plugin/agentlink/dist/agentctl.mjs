@@ -1,7 +1,8 @@
 import { createRequire as __agentlinkCreateRequire } from 'node:module'; const require = __agentlinkCreateRequire(import.meta.url);
 
 // src/client/agentctl.ts
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { parseArgs } from "node:util";
 
 // src/client/client.ts
@@ -170,6 +171,113 @@ var Client = class _Client extends EventEmitter {
   }
 };
 
+// src/client/wake.ts
+import fs2 from "node:fs";
+import path3 from "node:path";
+import { spawnSync } from "node:child_process";
+var WAKE_KINDS = /* @__PURE__ */ new Set(["message", "idle_notice"]);
+function stateFile(agent) {
+  return path3.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.json`);
+}
+function readState(agent) {
+  try {
+    const s = JSON.parse(fs2.readFileSync(stateFile(agent), "utf8"));
+    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [] };
+  } catch {
+    return { pid: 0, ts: 0, wakes: [] };
+  }
+}
+function writeState(agent, s) {
+  try {
+    fs2.mkdirSync(path3.dirname(stateFile(agent)), { recursive: true });
+    fs2.writeFileSync(stateFile(agent), JSON.stringify(s));
+  } catch {
+  }
+}
+function wakeOptionsFromEnv(agent) {
+  const num = (name, def) => {
+    const v = Number(process.env[name]);
+    return Number.isFinite(v) && v > 0 ? v : def;
+  };
+  return {
+    agent,
+    pollMs: Math.min(num("AGENTLINK_WAKE_POLL_MS", 25e3), 3e4),
+    maxMs: num("AGENTLINK_WAKE_MAX_MS", 12 * 60 * 60 * 1e3),
+    maxWakes: num("AGENTLINK_WAKE_MAX_WAKES", 10),
+    windowMs: num("AGENTLINK_WAKE_WINDOW_MS", 10 * 60 * 1e3),
+    settleMs: process.env.AGENTLINK_WAKE_SETTLE_MS === void 0 ? 2e3 : Math.max(0, Number(process.env.AGENTLINK_WAKE_SETTLE_MS) || 0)
+  };
+}
+function pidExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function findSessionPid() {
+  const forced = process.env.AGENTLINK_WAKE_SESSION_PID;
+  if (forced !== void 0) {
+    const n2 = Number(forced);
+    return Number.isInteger(n2) && n2 > 0 ? n2 : null;
+  }
+  if (process.platform !== "win32") return null;
+  const script = `$id=${process.ppid}; for($i=0;$i -lt 12 -and $id;$i++){ $p=Get-CimInstance Win32_Process -Filter "ProcessId=$id"; if(-not $p){break}; if($p.Name -match '^claude(.exe)?$' -or ($p.Name -eq 'node.exe' -and $p.CommandLine -match '@anthropic-ai[\\/]claude-code')){ $p.ProcessId; break }; $id=$p.ParentProcessId }`;
+  const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 1e4, windowsHide: true });
+  const n = Number(r.stdout?.trim());
+  return r.status === 0 && Number.isInteger(n) && n > 0 ? n : null;
+}
+function sessionAliveCheck(pid) {
+  return pid === null ? void 0 : () => pidExists(pid);
+}
+function wakeCommand(agentctlFile, agent) {
+  return `node --no-warnings "${agentctlFile.replace(/\\/g, "/")}" wake --agent ${agent}`;
+}
+var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitForWake(connect, o) {
+  const deadline = Date.now() + o.maxMs;
+  let client = null;
+  try {
+    for (; ; ) {
+      if (Date.now() > deadline) return { reason: "timeout" };
+      if (o.isSessionAlive && !o.isSessionAlive()) return { reason: "session-gone" };
+      try {
+        client ??= await connect();
+        const st = readState(o.agent);
+        writeState(o.agent, { ...st, pid: process.pid, ts: Date.now() });
+        const r = await client.request("inbox", { agent: o.agent, mode: "peek", state: "new", limit: 50, wait_ms: o.pollMs });
+        let wakeable = r.messages.filter((m) => WAKE_KINDS.has(m.kind)).length;
+        if (wakeable > 0 && o.settleMs > 0) {
+          await sleep2(o.settleMs);
+          const again = await client.request("inbox", { agent: o.agent, mode: "peek", state: "new", limit: 50 });
+          wakeable = Math.max(wakeable, again.messages.filter((m) => WAKE_KINDS.has(m.kind)).length);
+        }
+        if (wakeable > 0) {
+          const now = Date.now();
+          const recent = readState(o.agent).wakes.filter((t) => now - t < o.windowMs);
+          if (recent.length < o.maxWakes) {
+            writeState(o.agent, { pid: 0, ts: 0, wakes: [...recent, now] });
+            return { reason: "message", count: wakeable };
+          }
+          await sleep2(Math.min(3e4, o.pollMs));
+        } else if (r.messages.length > 0) {
+          await sleep2(Math.min(5e3, o.pollMs));
+        }
+      } catch (e) {
+        if (e instanceof ApiCallError && e.code === "NOT_REGISTERED") throw e;
+        client?.close();
+        client = null;
+        await sleep2(Math.min(2e3, o.pollMs));
+      }
+    }
+  } finally {
+    client?.close();
+    const st = readState(o.agent);
+    writeState(o.agent, { ...st, pid: 0, ts: 0 });
+  }
+}
+
 // src/client/agentctl.ts
 var USAGE = `agentctl - AgentLink command line client
 
@@ -189,6 +297,8 @@ Commands:
   status <busy|idle> set the agent status
   idle-notify <to>   ask for one notice when <to> becomes idle
   watch              stream incoming messages until interrupted
+  wake               wait, without reading anything, until a message is waiting, then print one line and exit.
+                     Run it as a background command in a Claude Code session so a message wakes the idle session.
   ping               start agentd if needed and print its info
   acl [reload]       show the ACL (who may send to whom); reload re-reads acl.json
   acl check <from> <to>  ask whether name@host may send to name@host
@@ -283,7 +393,7 @@ async function main() {
     return;
   }
   if (command === "pair") {
-    const sleep2 = (ms) => new Promise((r2) => setTimeout(r2, ms));
+    const sleep3 = (ms) => new Promise((r2) => setTimeout(r2, ms));
     const linkUp = async (host) => {
       const s = await client.request("peers");
       return s.peers?.find((p) => p.host === host)?.link === "up";
@@ -294,7 +404,7 @@ async function main() {
       let up = false;
       for (let i = 0; i < 20 && !up; i++) {
         up = await linkUp(r2.host);
-        if (!up) await sleep2(1e3);
+        if (!up) await sleep3(1e3);
       }
       console.log(up ? `Connected to ${r2.host}. Agents there are now visible as name@${r2.host}.` : `Paired, but the link to ${r2.host} is not up yet. Check "agentctl peers" in a moment.`);
       client.close();
@@ -311,7 +421,7 @@ async function main() {
 `);
     console.log(`This PC is "${r.host}" at ${r.address}:${r.port}. The code works once and expires in ${Math.round(r.expires_s / 60)} min.`);
     if (process.platform === "win32") {
-      const fw = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-NetFirewallRule -DisplayName 'AgentLink*' -ErrorAction SilentlyContinue | Measure-Object).Count"], { encoding: "utf8", timeout: 1e4 });
+      const fw = spawnSync2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-NetFirewallRule -DisplayName 'AgentLink*' -ErrorAction SilentlyContinue | Measure-Object).Count"], { encoding: "utf8", timeout: 1e4 });
       if (fw.status === 0 && fw.stdout.trim() === "0") {
         console.log(`
 No firewall rule for AgentLink found. If the other PC cannot connect, run this once in an administrator PowerShell:
@@ -325,14 +435,14 @@ No firewall rule for AgentLink found. If the other PC cannot connect, run this o
       }).finally(() => process.exit(130));
     });
     for (; ; ) {
-      await sleep2(1e3);
+      await sleep3(1e3);
       const s = await client.request("pair_status");
       if (s.state === "waiting") continue;
       if (s.state === "paired" && s.host) {
         let up = false;
         for (let i = 0; i < 20 && !up; i++) {
           up = await linkUp(s.host);
-          if (!up) await sleep2(1e3);
+          if (!up) await sleep3(1e3);
         }
         console.log(up ? `Paired with ${s.host} and connected.` : `Paired with ${s.host}. The link comes up as soon as that PC connects (see "agentctl peers").`);
         client.close();
@@ -420,6 +530,24 @@ ${m.message}`).join("\n\n"));
       const r = await client.request("notify_when_idle", { agent, target: rest[0] });
       out(r, r.immediate ? "target is already idle; notice queued" : "subscribed");
       break;
+    }
+    case "wake": {
+      let first = client;
+      const r = await waitForWake(async () => {
+        const c = first ?? await Client.connect();
+        first = null;
+        return c;
+      }, { ...wakeOptionsFromEnv(agent), isSessionAlive: sessionAliveCheck(findSessionPid()) });
+      if (r.reason === "session-gone") return;
+      if (r.reason === "message") {
+        const n = r.count;
+        console.log(
+          `AgentLink: ${n} new message${n === 1 ? "" : "s"} arrived while this session was idle. Call read_inbox to read ${n === 1 ? "it" : "them"}, then start the watcher again in the background: ${wakeCommand(fileURLToPath2(import.meta.url), agent)}`
+        );
+      } else {
+        console.log(`AgentLink: the watcher stopped after its time limit. Start it again if you still want to be woken: ${wakeCommand(fileURLToPath2(import.meta.url), agent)}`);
+      }
+      return;
     }
     case "watch": {
       await client.request("subscribe", { agent, events: ["message", "idle"] });

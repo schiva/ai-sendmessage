@@ -268,7 +268,7 @@ test('hooks: UserPromptSubmit marks busy and injects waiting messages once', asy
   assert.equal(row?.unread, 0)
 
   const none = runHook('UserPromptSubmit', { ...HOOK_IN, prompt: 'again' }, HOOK_ENV)
-  assert.equal(none.out, '', 'nothing is injected twice')
+  assert.ok(!none.out.includes('<agentlink-message'), 'a message is not injected twice (a reminder about the idle watcher may appear, see wake.test.ts)')
 })
 
 test('hooks: PostToolUse injects messages that arrive mid-turn', async () => {
