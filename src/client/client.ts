@@ -49,7 +49,12 @@ function startDaemon(env: NodeJS.ProcessEnv): void {
   child.unref()
 }
 
-async function connectWithAutostart(pipe: string, autostart: boolean, env: NodeJS.ProcessEnv, home: string): Promise<net.Socket> {
+/** How long a client waits for a daemon it has just started to accept connections (the default for every client but the hooks). */
+export const DEFAULT_START_TIMEOUT_MS = 8_000
+/** How long a client waits for the token file of a daemon that accepts connections (it is written before the pipe opens, so this is only a safety margin). */
+export const TOKEN_WAIT_MS = 3_000
+
+async function connectWithAutostart(pipe: string, autostart: boolean, env: NodeJS.ProcessEnv, home: string, startTimeoutMs: number): Promise<net.Socket> {
   try {
     return await tryConnect(pipe)
   } catch (e) {
@@ -57,7 +62,7 @@ async function connectWithAutostart(pipe: string, autostart: boolean, env: NodeJ
     if (!autostart || (code !== 'ENOENT' && code !== 'ECONNREFUSED')) throw e
   }
   startDaemon(env)
-  const deadline = Date.now() + 8000
+  const deadline = Date.now() + startTimeoutMs
   let last: unknown
   while (Date.now() < deadline) {
     await sleep(100)
@@ -67,12 +72,12 @@ async function connectWithAutostart(pipe: string, autostart: boolean, env: NodeJ
       last = e
     }
   }
-  throw new Error(`agentd did not start within 8s (${String((last as Error)?.message ?? last)}); see ${path.join(home, 'agentd.log')}`)
+  throw new Error(`agentd did not start within ${Math.round(startTimeoutMs / 100) / 10}s (${String((last as Error)?.message ?? last)}); see ${path.join(home, 'agentd.log')}`)
 }
 
 async function readToken(home: string): Promise<string> {
   const file = path.join(home, 'token')
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < TOKEN_WAIT_MS / 100; i++) {
     try {
       const t = fs.readFileSync(file, 'utf8').trim()
       if (t) return t
@@ -116,13 +121,13 @@ export class Client extends EventEmitter {
    * By default this talks to the daemon of the current user. `pipe`, `home` and `env` address another daemon
    * (used to run several hosts on one PC for tests); `env` is also what an auto-started daemon receives.
    */
-  static async connect(opts: { autostart?: boolean; pipe?: string; home?: string; env?: Record<string, string> } = {}): Promise<Client> {
+  static async connect(opts: { autostart?: boolean; pipe?: string; home?: string; env?: Record<string, string>; startTimeoutMs?: number } = {}): Promise<Client> {
     const env: NodeJS.ProcessEnv = { ...process.env, ...opts.env }
     if (opts.pipe) env.AGENTLINK_PIPE = opts.pipe
     if (opts.home) env.AGENTLINK_HOME = opts.home
     const pipe = opts.pipe ?? opts.env?.AGENTLINK_PIPE ?? pipePath()
     const home = opts.home ?? opts.env?.AGENTLINK_HOME ?? homeDir()
-    const socket = await connectWithAutostart(pipe, opts.autostart ?? true, env, home)
+    const socket = await connectWithAutostart(pipe, opts.autostart ?? true, env, home, opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS)
     const c = new Client(socket)
     const token = await readToken(home)
     c.hello = (await c.request('hello', { v: 1, client: 'agentlink-client', token })) as HelloResult
