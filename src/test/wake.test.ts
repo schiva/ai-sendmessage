@@ -394,6 +394,21 @@ test('a stop request file left over from before does not stop a watcher that sta
   w.child.kill()
 })
 
+test('watchers that do not answer are waited for together: one grace period in total, not one per agent', async () => {
+  const grace = 2000
+  const agents = ['ag_par_1', 'ag_par_2', 'ag_par_3']
+  const fakes = agents.map(() => fakeWatcher())
+  agents.forEach((a, i) => writeWatcherState(a, fakes[i].pid as number))
+  const t0 = Date.now()
+  const reports = (await stopWatchers(undefined, grace)).filter(r => agents.includes(r.agent))
+  const took = Date.now() - t0
+  assert.deepEqual(reports.map(r => r.how), ['killed', 'killed', 'killed'], JSON.stringify(reports))
+  assert.deepEqual(reports.map(r => r.agent), agents, 'the reports keep the order of the agents')
+  // One after the other this takes at least 3 x grace (6 s) plus three process checks; together about grace plus one check.
+  assert.ok(took < 2 * grace + 1500, `took ${took} ms for three silent watchers with a grace period of ${grace} ms`)
+  for (const f of fakes) await until(() => f.exitCode !== null || f.signalCode !== null, 3000)
+})
+
 test('wake --stop leaves no stop request behind, whether the watcher answered, was ended by its PID or was refused', async () => {
   const answered = (await reg('clean-answered')).agent
   const w = startWatcher(answered)

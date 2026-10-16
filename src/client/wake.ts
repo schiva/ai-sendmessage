@@ -5,7 +5,7 @@
 // input and reach the model only through read_inbox or the hooks, wrapped as such).
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { homeDir } from '../agentd/config.ts'
 import { readJsonStable, writeFileAtomic } from './atomic-file.ts'
 import { Client, ApiCallError } from './client.ts'
@@ -209,15 +209,19 @@ function watcherAgents(): string[] {
 }
 
 /** True only if the process with this PID really is an agentctl watcher: a PID that was reused by something else must never be killed. */
-function isWatcherProcess(pid: number): boolean {
-  if (process.platform !== 'win32') return false
-  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], {
-    encoding: 'utf8',
-    timeout: 10_000,
-    windowsHide: true,
+function isWatcherProcess(pid: number): Promise<boolean> {
+  if (process.platform !== 'win32') return Promise.resolve(false)
+  return new Promise(resolve => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+      { encoding: 'utf8', timeout: 10_000, windowsHide: true },
+      (err, stdout) => {
+        const line = err ? '' : (stdout ?? '')
+        resolve(/agentctl\.(mjs|ts)/.test(line) && /\swake(\s|$)/.test(line))
+      },
+    )
   })
-  const line = r.status === 0 ? (r.stdout ?? '') : ''
-  return /agentctl\.(mjs|ts)/.test(line) && /\swake(\s|$)/.test(line)
 }
 
 async function gone(pid: number, ms: number): Promise<boolean> {
@@ -229,49 +233,47 @@ async function gone(pid: number, ms: number): Promise<boolean> {
   return true
 }
 
+/** Ends the idle watcher of one agent (see stopWatchers). */
+async function stopOne(a: string, graceMs: number): Promise<StopReport> {
+  const st = readState(a)
+  if (st.pid === 0 || !pidExists(st.pid)) {
+    if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false })
+    clearStopRequest(a)
+    return { agent: a, pid: st.pid, how: 'not-running' }
+  }
+  try {
+    fs.writeFileSync(stopFile(a), '') // the request that cannot be overwritten
+  } catch {
+    // the flag in the state file below still reaches a watcher
+  }
+  writeState(a, { ...st, stop: true }) // for watchers of version 0.2.3 and older, which only read this
+  if (await gone(st.pid, graceMs)) {
+    clearStopRequest(a)
+    return { agent: a, pid: st.pid, how: 'requested' }
+  }
+  if (!(await isWatcherProcess(st.pid))) {
+    clearStopRequest(a)
+    writeState(a, { ...readState(a), stop: false })
+    return { agent: a, pid: st.pid, how: 'refused', detail: 'the recorded PID is not an agentctl watcher (not touched)' }
+  }
+  try {
+    process.kill(st.pid)
+  } catch (e) {
+    clearStopRequest(a)
+    return { agent: a, pid: st.pid, how: 'refused', detail: String(e instanceof Error ? e.message : e) }
+  }
+  const ended = await gone(st.pid, 3_000)
+  clearStopRequest(a)
+  writeState(a, { ...readState(a), pid: ended ? 0 : st.pid, ts: 0, stop: false })
+  return ended ? { agent: a, pid: st.pid, how: 'killed' } : { agent: a, pid: st.pid, how: 'refused', detail: 'it did not end' }
+}
+
 /**
  * Ends the idle watcher of one agent, or of every agent when none is given. It asks first (the watcher checks within one poll and ends
  * cleanly); a watcher that does not answer, such as one of an older version, is ended by the PID it recorded, after checking that this PID
- * is an agentctl watcher. Never matches processes by name.
+ * is an agentctl watcher. Never matches processes by name. The agents are handled at the same time, so the wait for watchers that do not
+ * answer is one grace period in total, not one per agent; the reports keep the order of the agents.
  */
 export async function stopWatchers(agent?: string, graceMs = 8_000): Promise<StopReport[]> {
-  const reports: StopReport[] = []
-  for (const a of agent ? [agent] : watcherAgents()) {
-    const st = readState(a)
-    if (st.pid === 0 || !pidExists(st.pid)) {
-      if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false })
-      clearStopRequest(a)
-      reports.push({ agent: a, pid: st.pid, how: 'not-running' })
-      continue
-    }
-    try {
-      fs.writeFileSync(stopFile(a), '') // the request that cannot be overwritten
-    } catch {
-      // the flag in the state file below still reaches a watcher
-    }
-    writeState(a, { ...st, stop: true }) // for watchers of version 0.2.3 and older, which only read this
-    if (await gone(st.pid, graceMs)) {
-      clearStopRequest(a)
-      reports.push({ agent: a, pid: st.pid, how: 'requested' })
-      continue
-    }
-    if (!isWatcherProcess(st.pid)) {
-      clearStopRequest(a)
-      writeState(a, { ...readState(a), stop: false })
-      reports.push({ agent: a, pid: st.pid, how: 'refused', detail: 'the recorded PID is not an agentctl watcher (not touched)' })
-      continue
-    }
-    try {
-      process.kill(st.pid)
-    } catch (e) {
-      clearStopRequest(a)
-      reports.push({ agent: a, pid: st.pid, how: 'refused', detail: String(e instanceof Error ? e.message : e) })
-      continue
-    }
-    const ended = await gone(st.pid, 3_000)
-    clearStopRequest(a)
-    writeState(a, { ...readState(a), pid: ended ? 0 : st.pid, ts: 0, stop: false })
-    reports.push(ended ? { agent: a, pid: st.pid, how: 'killed' } : { agent: a, pid: st.pid, how: 'refused', detail: 'it did not end' })
-  }
-  return reports
+  return Promise.all((agent ? [agent] : watcherAgents()).map(a => stopOne(a, graceMs)))
 }
