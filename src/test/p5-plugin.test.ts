@@ -82,6 +82,8 @@ test('marketplace.json points at the plugin and agrees with its version', () => 
   const entry = mp.plugins[0]
   assert.equal(entry.name, manifest.name)
   assert.equal(entry.version, manifest.version)
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'))
+  assert.equal(manifest.version, pkg.version, 'plugin.json follows package.json: run "npm run build:plugin" after changing the version')
   assert.ok(entry.source.startsWith('./'))
   assert.ok(fs.existsSync(path.join(REPO, entry.source, '.claude-plugin', 'plugin.json')))
 })
@@ -120,6 +122,8 @@ test('standalone: agentctl starts the bundled daemon and two agents exchange a m
   const ping = ctl('ping')
   assert.equal(ping.status, 0, ping.err)
   assert.match(ping.out, /host=pc-plugin/)
+  const pkgVersion = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).version
+  assert.ok(ping.out.startsWith(`agentd ${pkgVersion} `), `the bundled daemon reports the package version (${pkgVersion}): ${ping.out}`)
   assert.equal(ctl('--as', 'alice', 'register').status, 0)
   assert.equal(ctl('--as', 'bob', 'register').status, 0)
   const sent = ctl('--as', 'alice', 'send', 'bob', 'from the bundled cli')

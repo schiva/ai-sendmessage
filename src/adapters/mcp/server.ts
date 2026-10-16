@@ -8,11 +8,12 @@ import { deriveIdentity } from '../common/identity.ts'
 import { SERVER_INSTRUCTIONS, renderMessages } from '../common/format.ts'
 import type { IncomingMessage } from '../common/format.ts'
 import { Session } from '../common/session.ts'
+import { VERSION } from '../../version.ts'
 
 const identity = deriveIdentity(process.env, process.cwd())
 const session = new Session(identity)
 
-const mcp = new Server({ name: 'agentlink', version: '0.1.0' }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS })
+const mcp = new Server({ name: 'agentlink', version: VERSION }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS })
 
 const TOOLS = [
   {

@@ -11,11 +11,23 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // AGENTLINK_BUILD_OUT lets a test build into a scratch folder and compare with the committed bundle.
 const out = process.env.AGENTLINK_BUILD_OUT ?? path.join(root, 'plugin', 'agentlink', 'dist')
 
+const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
+
 const entries = {
   'hook.mjs': 'src/adapters/claude/hook.ts',
   'mcp-server.mjs': 'src/adapters/mcp/server.ts',
   'agentd.mjs': 'src/agentd/main.ts',
   'agentctl.mjs': 'src/client/agentctl.ts',
+}
+
+// Keep the manifests on the version of package.json. A plugin that keeps its version number is never updated by Claude Code
+// ("already at the latest version"), so a release must change it. Not done for test builds into a scratch folder.
+if (!process.env.AGENTLINK_BUILD_OUT) {
+  for (const file of [path.join(root, 'plugin', 'agentlink', '.claude-plugin', 'plugin.json'), path.join(root, '.claude-plugin', 'marketplace.json')]) {
+    const text = fs.readFileSync(file, 'utf8')
+    const next = text.replace(/("version":\s*")[^"]*(")/, `$1${version}$2`)
+    if (next !== text) fs.writeFileSync(file, next)
+  }
 }
 
 fs.rmSync(out, { recursive: true, force: true })
@@ -37,6 +49,7 @@ for (const [file, entry] of Object.entries(entries)) {
     banner: { js: "import { createRequire as __agentlinkCreateRequire } from 'node:module'; const require = __agentlinkCreateRequire(import.meta.url);" },
     legalComments: 'none',
     metafile: true,
+    define: { __AGENTLINK_VERSION__: JSON.stringify(version) },
     logLevel: 'warning',
   })
   for (const input of Object.keys(result.metafile.inputs)) {

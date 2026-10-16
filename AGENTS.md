@@ -17,6 +17,10 @@ user for consent; then `node scripts/install.mjs --yes`. Never edit the user's C
 - `npm test` rebuilds the plugin bundle first and fails when the committed `plugin/agentlink/dist` differs from a fresh
   build. After changing anything under `src/` that a bundle uses, run `npm run build:plugin` and commit `dist` together with
   the source change.
+- Releasing: the version is `version` in `package.json`. Change it for every release, then run `npm run build:plugin`: it writes
+  the version into `plugin.json`, `marketplace.json` and the bundles, and `npm test` fails if they disagree. Claude Code only
+  updates an installed plugin when its version number changed; otherwise `claude plugin update` answers "already at the latest
+  version".
 - The end-to-end scripts (`npm run e2e:claude`, `e2e:interactive`, `e2e:plugin`) start real Claude Code sessions and use the
   model (tens of cents each). Do not run them unless asked. `npm test` does not use the model.
 - Tests that need several hosts start several daemons on one PC (see `src/test/lan-harness.ts`); never point a test at the

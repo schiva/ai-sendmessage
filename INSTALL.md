@@ -57,7 +57,7 @@ Tell the user, in your own words:
   file of the chosen scope.
 - Afterwards **every Claude Code session in that scope** runs the AgentLink hooks (small `node` processes at session start, on
   each prompt, after each tool call, and at the end) and an MCP server, and a background daemon starts on first use.
-- It can be undone with one command (step 6).
+- It can be undone with one command (step 7).
 
 Scope: `user` (default) means every project of this user; `project` writes to the project's `.claude/settings.json` (shared
 with the team through git); `local` is this project and this user only. When in doubt use `user`.
@@ -111,7 +111,20 @@ starts the daemon and prints its host name.
 - To connect another PC, run `agentctl pair` on one PC and `agentctl pair <code>` on the other (see [docs/LAN.md](docs/LAN.md)). To restrict who may message whom, see
   [docs/ACL.md](docs/ACL.md).
 
-## 6. Uninstall
+## 6. Update
+
+```
+claude plugin marketplace update agentlink-marketplace
+claude plugin update agentlink@agentlink-marketplace
+agentctl stop
+```
+
+`agentctl stop` ends the running daemon, which still has the old code; the next command starts the new one. Then start a new
+Claude Code session or run `/reload-plugins`, and check `claude plugin list` for the new version. If `plugin update` says
+"already at the latest version" although the repository has newer commits, those commits did not change the version number:
+uninstall and install the plugin again (step 7, then step 3).
+
+## 7. Uninstall
 
 ```
 node scripts/install.mjs --uninstall --yes [--remove-marketplace]

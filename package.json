@@ -1,6 +1,6 @@
 {
   "name": "ai-sendmessage",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "LAN extension of Claude Code SendMessage (see docs/RFP.md)",

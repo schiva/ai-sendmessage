@@ -6,6 +6,7 @@ import type { AgentStatus, MessageKind, MessageState } from './protocol.ts'
 import type { AgentRow, MessageRow, Store } from './store.ts'
 import type { MsgFrame, NoticeFrame, RemoteAgent, RemoteGateway, WatchFrame } from './remote.ts'
 import type { Acl } from './acl.ts'
+import { VERSION } from '../version.ts'
 
 type Params = Record<string, unknown>
 
@@ -213,7 +214,7 @@ export class Core {
     const v = p.v
     if (v !== PROTOCOL_VERSION) throw new ApiError('BAD_REQUEST', `unsupported protocol version ${String(v)} (server speaks ${PROTOCOL_VERSION})`)
     return {
-      server_version: '0.1.0',
+      server_version: VERSION,
       protocol: PROTOCOL_VERSION,
       host: this.host,
       lease_ms: this.cfg.leaseMs,

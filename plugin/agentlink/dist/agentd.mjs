@@ -2289,7 +2289,7 @@ var require_websocket = __commonJS({
     var tls = __require("tls");
     var { randomBytes: randomBytes4, createHash } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
-    var { URL } = __require("url");
+    var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
     var Receiver2 = require_receiver();
     var Sender2 = require_sender();
@@ -2803,11 +2803,11 @@ var require_websocket = __commonJS({
         );
       }
       let parsedUrl;
-      if (address instanceof URL) {
+      if (address instanceof URL2) {
         parsedUrl = address;
       } else {
         try {
-          parsedUrl = new URL(address);
+          parsedUrl = new URL2(address);
         } catch {
           throw new SyntaxError(`Invalid URL: ${address}`);
         }
@@ -2944,7 +2944,7 @@ var require_websocket = __commonJS({
           req.abort();
           let addr;
           try {
-            addr = new URL(location, address);
+            addr = new URL2(location, address);
           } catch (e) {
             const err = new SyntaxError(`Invalid URL: ${location}`);
             emitErrorAndClose(websocket, err);
@@ -19988,7 +19988,7 @@ var require_x509_cjs = __commonJS({
     var DN = "dn";
     var EMAIL = "email";
     var IP = "ip";
-    var URL = "url";
+    var URL2 = "url";
     var GUID = "guid";
     var UPN = "upn";
     var REGISTERED_ID = "id";
@@ -20043,7 +20043,7 @@ var require_x509_cjs = __commonJS({
               });
               break;
             }
-            case URL:
+            case URL2:
               name = new asn1X509__namespace.GeneralName({ uniformResourceIdentifier: args[1] });
               break;
             default:
@@ -20067,7 +20067,7 @@ var require_x509_cjs = __commonJS({
           this.type = IP;
           this.value = asn.iPAddress;
         } else if (asn.uniformResourceIdentifier != void 0) {
-          this.type = URL;
+          this.type = URL2;
           this.value = asn.uniformResourceIdentifier;
         } else if (asn.registeredID != void 0) {
           this.type = REGISTERED_ID;
@@ -20114,7 +20114,7 @@ var require_x509_cjs = __commonJS({
           case IP:
           case REGISTERED_ID:
           case UPN:
-          case URL:
+          case URL2:
             type = this.type.toUpperCase();
             break;
           case EMAIL:
@@ -22397,7 +22397,7 @@ var require_x509_cjs = __commonJS({
     exports.TextConverter = TextConverter;
     exports.TextObject = TextObject;
     exports.UPN = UPN;
-    exports.URL = URL;
+    exports.URL = URL2;
     exports.X509Certificate = X509Certificate2;
     exports.X509CertificateGenerator = X509CertificateGenerator;
     exports.X509Certificates = X509Certificates;
@@ -22901,6 +22901,9 @@ var ApiError = class extends Error {
   }
 };
 
+// src/version.ts
+var VERSION = true ? "0.2.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
 // src/agentd/core.ts
 function str(p, name, opts = {}) {
   const v = p[name];
@@ -23067,7 +23070,7 @@ var Core = class {
     const v = p.v;
     if (v !== PROTOCOL_VERSION) throw new ApiError("BAD_REQUEST", `unsupported protocol version ${String(v)} (server speaks ${PROTOCOL_VERSION})`);
     return {
-      server_version: "0.1.0",
+      server_version: VERSION,
       protocol: PROTOCOL_VERSION,
       host: this.host,
       lease_ms: this.cfg.leaseMs,

@@ -17274,10 +17274,13 @@ var Session = class {
   }
 };
 
+// src/version.ts
+var VERSION = true ? "0.2.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
 // src/adapters/mcp/server.ts
 var identity = deriveIdentity(process.env, process.cwd());
 var session = new Session(identity);
-var mcp = new Server({ name: "agentlink", version: "0.1.0" }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
+var mcp = new Server({ name: "agentlink", version: VERSION }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
 var TOOLS = [
   {
     name: "send_message",
