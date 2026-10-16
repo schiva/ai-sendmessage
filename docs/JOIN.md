@@ -99,3 +99,16 @@
 
 - 알림 방식의 구체적인 모양(감시기가 세션을 깨워 알리는 방식과 그 문구).
 - `pair approve`가 TTY를 못 쓰는 환경(예: 원격 셸 도구)에서 사용자가 승인하는 방법. 현재 안은 "자기 터미널에서 실행"이다.
+
+## 10. 남은 항목 (2026-10-16 기준, `desktop/join`을 `main`에 병합한 시점)
+
+구현(데몬, SAS 모듈, CLI)과 시험(`npm test` 264개 통과)은 `main`에 들어 있지만, 아래는 **끝나지 않았다.** 사용자가 Git 정리만 먼저 하고 나머지는 문서에 남기기로 했다.
+
+1. **0.5.0 릴리스.** `package.json`의 버전은 아직 0.4.0이다. 올리는 일, `npm run build:plugin`, 태그·릴리스는 사용자 승인 뒤에 메인이 한다(AGENTS.md "Releasing").
+2. **실제 두 PC에서의 join 시험.** 한 PC의 임시 데몬 둘로만 시험했다(`join-protocol.test.ts`, `join-cli-real.test.ts`). desktop-scmain, asus, devmain 중 두 대로 `pair --open`, `join`, `pair approve`를 실제로 해 보는 시험은 없다. 방화벽(TCP 7420 인바운드)과 실제 지연에서의 동작도 확인하지 않았다.
+3. **`LAN.md`의 join 절을 실제 CLI에 맞추기.** agy가 `JOIN-API.md`를 보고 썼고, 알림 문구(예: 한국어 예시 줄)와 프롬프트 문구는 asus가 만든 실제 출력(영어, `src/client/join-cli.ts`)과 다를 수 있다. 종료 코드는 `JOIN-API.md`에 반영했다.
+4. **적대적 시험 `J-ADV`(중단됨).** 아래 `JOIN.md` 8절 항목 중 일부는 시험이 없다: 인증 전 연결 32개와 주소 8개로 대기 슬롯 채우기(6), 창이 닫힌 뒤 reveal, 다른 세션의 commit 재사용, H의 challenge를 되돌리는 반사, TLS 인증 전 프레임(7), 재참가 승인 뒤 옛 토큰이 인증되지 않는지와 옛 링크가 끊기는지(9, 지금은 새 토큰과 새 링크만 확인), 같은 요청의 두 번 승인, 승인 중 창 만료, 승인 중 데몬이 죽었을 때 `peers.json`이 반쯤 쓰이지 않는지(11), 이상한 JSON·이진 프레임·큰 hex, 오류 경로에서 번호가 로그에 남지 않는지. 시험은 임시 데몬만 쓰고 새 파일(`src/test/join-adversarial.test.ts`)에 쓰기로 했다.
+5. **새 PC 입장에서 따라 하기 `J-WALK`(취소됨).** 처음 쓰는 사람이 `LAN.md`의 join 절을 그대로 따라 해 보고 막힌 곳을 보고하는 시험. 별도 PC(devmain)가 필요하다.
+6. **다른 문서.** `README.md`, `INSTALL.md`에 join 사용법이 없다. (`LOCAL-API.md`와 `LAN.md`에는 있다.)
+7. **`docs/TEAM.md`의 담당 표.** agy는 종료했다. 표(1절, 6절)를 현재 구성에 맞춰 고쳐야 한다.
+8. **알려진 한계.** `pair approve`의 TTY 요구는 PTY를 만들 수 있는 에이전트를 막지 못한다(위 "한계"). 창이 닫히면 LAN 포트도 닫혀서(다른 피어가 없는 PC) 새 PC는 `window_closed` 대신 연결 거부를 본다.
