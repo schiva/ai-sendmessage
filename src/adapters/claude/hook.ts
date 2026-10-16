@@ -4,6 +4,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { appendLog } from '../../agentd/applog.ts'
 import { homeDir } from '../../agentd/config.ts'
 import { readJsonStable, writeFileAtomic } from '../../client/atomic-file.ts'
 import { Client } from '../../client/client.ts'
@@ -200,7 +201,8 @@ main()
   .catch(e => {
     try {
       fs.mkdirSync(homeDir(), { recursive: true })
-      fs.appendFileSync(path.join(homeDir(), 'hook-errors.log'), `${new Date().toISOString()} ${process.argv[2]} ${String(e instanceof Error ? e.message : e)}\n`)
+      // Rotated at 1 MiB (one older generation, hook-errors.log.1): a hook that fails on every tool call would otherwise grow this file forever.
+      appendLog(path.join(homeDir(), 'hook-errors.log'), `${new Date().toISOString()} ${process.argv[2]} ${String(e instanceof Error ? e.message : e)}`)
     } catch {
       // nothing else to do
     }

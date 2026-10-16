@@ -215,3 +215,64 @@ test('AGENTLINK_STOP_WAKE_WAIT_MS lowers the Stop hook wait but never raises it 
   assert.equal(stopWakeWaitMs({ AGENTLINK_STOP_WAKE_WAIT_MS: 'soon' }), STOP_WAKE_WAIT_MS, 'nonsense is ignored')
   assert.equal(stopWakeWaitMs({ AGENTLINK_STOP_WAKE_WAIT_MS: '-5' }), STOP_WAKE_WAIT_MS, 'so is a negative value')
 })
+
+// --- hook-errors.log is rotated -------------------------------------------------------------------------------------
+
+/** A hook that fails at once: it reaches the running test daemon but with a wrong token, so the handshake is refused. */
+function failingHook(home: string, event = 'PostToolUse'): HookRun {
+  fs.writeFileSync(path.join(home, 'token'), 'not-the-token-of-this-daemon-0123456789')
+  const r = spawnSync(process.execPath, ['--no-warnings', HOOK, event], {
+    input: JSON.stringify({ session_id: `round2-log-${randomBytes(3).toString('hex')}`, cwd: REPO }),
+    env: { ...process.env, AGENTLINK_HOME: home, AGENTLINK_NAME: 'logger' },
+    encoding: 'utf8',
+    timeout: 20000,
+  })
+  const out = r.stdout.trim()
+  return { status: r.status, out, stderr: r.stderr, json: out ? JSON.parse(out) : null }
+}
+
+const freshHome = (name: string): string => fs.mkdtempSync(path.join(tmp, `${name}-`))
+
+test('hook-errors.log: a failing hook appends one line and exits quietly; a small log is not rotated', () => {
+  const home = freshHome('log-small')
+  const a = failingHook(home)
+  const b = failingHook(home, 'UserPromptSubmit')
+  for (const r of [a, b]) {
+    assert.equal(r.status, 0, `a hook never fails the session (stderr: ${r.stderr})`)
+    assert.equal(r.out, '', 'and says nothing')
+  }
+  const lines = fs.readFileSync(path.join(home, 'hook-errors.log'), 'utf8').trim().split('\n')
+  assert.equal(lines.length, 2)
+  assert.match(lines[0], /^\d{4}-\d\d-\d\dT[\d:.]+Z PostToolUse /)
+  assert.match(lines[1], / UserPromptSubmit /)
+  assert.equal(fs.existsSync(path.join(home, 'hook-errors.log.1')), false, 'nothing to rotate yet')
+})
+
+test('hook-errors.log: at 1 MiB the log becomes .1 and a new one starts; only one older generation is kept', () => {
+  const home = freshHome('log-rotate')
+  const log = path.join(home, 'hook-errors.log')
+  const filler = `${'x'.repeat(99)}\n`
+  fs.writeFileSync(log, filler.repeat(Math.ceil((1024 * 1024) / filler.length)))
+  const before = fs.statSync(log).size
+  assert.ok(before >= 1024 * 1024)
+
+  assert.equal(failingHook(home).status, 0)
+  assert.equal(fs.statSync(`${log}.1`).size, before, 'the full log was kept as .1, untouched')
+  const fresh = fs.readFileSync(log, 'utf8').trim().split('\n')
+  assert.equal(fresh.length, 1, 'a new log with the new line only')
+  assert.match(fresh[0], / PostToolUse /)
+
+  // A second rotation replaces .1 instead of piling up generations.
+  fs.writeFileSync(log, filler.repeat(Math.ceil((1024 * 1024) / filler.length)) + 'marker-of-the-second-generation\n')
+  assert.equal(failingHook(home).status, 0)
+  assert.match(fs.readFileSync(`${log}.1`, 'utf8'), /marker-of-the-second-generation/)
+  assert.deepEqual(fs.readdirSync(home).filter(f => f.startsWith('hook-errors')).sort(), ['hook-errors.log', 'hook-errors.log.1'])
+})
+
+test('hook-errors.log: a log that cannot be written never fails the hook', () => {
+  const home = freshHome('log-blocked')
+  fs.mkdirSync(path.join(home, 'hook-errors.log')) // a folder where the log should be
+  const r = failingHook(home)
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  assert.equal(r.out, '')
+})
