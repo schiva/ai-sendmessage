@@ -534,7 +534,7 @@ ${m.message}`).join("\n\n"));
     case "wake": {
       let first = client;
       const r = await waitForWake(async () => {
-        const c = first ?? await Client.connect();
+        const c = first ?? await Client.connect({ autostart: false });
         first = null;
         return c;
       }, { ...wakeOptionsFromEnv(agent), isSessionAlive: sessionAliveCheck(findSessionPid()) });

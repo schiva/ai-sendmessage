@@ -119,7 +119,9 @@ claude plugin update agentlink@agentlink-marketplace
 agentctl stop
 ```
 
-`agentctl stop` ends the running daemon, which still has the old code; the next command starts the new one. Then start a new
+`agentctl stop` ends the running daemon, which still has the old code; the next command starts the new one. (Idle watchers of
+version 0.2.0 and older restart the daemon they were started from after a `stop`, so end those first: they end when their
+Claude session ends, or kill the `agentctl.mjs wake` process. Newer watchers never start a daemon.) Then start a new
 Claude Code session or run `/reload-plugins`, and check `claude plugin list` for the new version. If `plugin update` says
 "already at the latest version" although the repository has newer commits, those commits did not change the version number:
 uninstall and install the plugin again (step 7, then step 3).

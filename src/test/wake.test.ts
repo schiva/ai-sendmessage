@@ -131,18 +131,23 @@ test('the watcher ends with an error when the session has ended', async () => {
   assert.match(w.err(), /NOT_REGISTERED/)
 })
 
-test('the watcher survives a daemon restart', async () => {
+test('the watcher survives a daemon restart without starting one, and wakes on the new daemon', async () => {
   const survivor = await reg('survivor')
   const w = startWatcher(survivor.agent)
   assert.ok(await stillRunning(w, 700))
   const c = await Client.connect({ autostart: false })
   await c.request('shutdown')
   c.close()
+  ctl.close()
   await sleep(800)
   assert.ok(await stillRunning(w, 1500), 'it keeps trying instead of waking the session with an error')
-  w.child.kill()
-  ctl.close()
-  ctl = await Client.connect() // the first connection died with the old daemon
+  await assert.rejects(Client.connect({ autostart: false }), /ENOENT|ECONNREFUSED/, 'the watcher did not bring a daemon back: an update that stops the daemon must stay stopped')
+
+  ctl = await Client.connect() // someone starts the (new) daemon
+  const sender = await reg('sender4')
+  await send(sender.agent, 'survivor', 'after the restart')
+  assert.equal(await w.exited, 0, w.err())
+  assert.match(w.out(), /1 new message arrived/)
 })
 
 // --- the hooks ----------------------------------------------------------------------------------

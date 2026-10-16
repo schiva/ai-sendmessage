@@ -272,7 +272,8 @@ async function main(): Promise<void> {
     case 'wake': {
       let first: Client | null = client
       const r = await waitForWake(async () => {
-        const c = first ?? (await Client.connect())
+        // Reconnecting never starts a daemon: after "agentctl stop" (an update) a watcher must not bring the old code back.
+        const c = first ?? (await Client.connect({ autostart: false }))
         first = null
         return c
       }, { ...wakeOptionsFromEnv(agent), isSessionAlive: sessionAliveCheck(findSessionPid()) })
