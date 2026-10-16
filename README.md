@@ -2,6 +2,14 @@
 
 같은 PC와 LAN의 다른 PC에서 실행되는 AI 에이전트들이 서로 메시지를 주고받는, 에이전트 중립 메시징 프레임워크입니다.
 
+## AI 에이전트에게 설치를 맡기기
+
+Claude Code에 이렇게 말하면 저장소만 보고 플러그인을 설치합니다(설정을 바꾸기 전에 사용자에게 먼저 묻도록 되어 있습니다).
+
+> https://github.com/schiva/ai-sendmessage 의 INSTALL.md를 읽고 AgentLink 플러그인을 설치해 줘. 설정을 바꾸기 전에 나에게 먼저 물어봐.
+
+사람이 직접 하려면 [INSTALL.md](INSTALL.md)를 보거나 저장소를 받아 `node scripts/install.mjs`(계획만 출력)와 `node scripts/install.mjs --yes`(설치)를 실행하면 됩니다. 이미 설치되어 있어도 안전하고, 제거는 `--uninstall --yes`입니다.
+
 ## 목적
 
 1. **에이전트 간 메시징**: Claude Code의 `SendMessage`/`ListAgents` 의미 체계(이름 주소, 답장, 큐, 전달 확인, 상태 조회, idle 알림)를 참고해, 같은 PC와 LAN(Windows 11, 최대 5대)에서 동작하는 독립 프레임워크를 만듭니다.
@@ -63,6 +71,8 @@ npm run agentctl -- stop
 |---|---|---|
 | [docs/RFP.md](docs/RFP.md) | 목적, 범위, 구성, 기능/보안 요구사항, 프로토콜, 위험, 단계별 계획, 인수 기준 | 초안 v0.2 |
 | [docs/LOCAL-API.md](docs/LOCAL-API.md) | agentd와 어댑터 사이의 로컬 API(메서드, 오류 코드, 어댑터 매핑, 한도, P1 확정 세부) | 확정 v1.0 |
+| [INSTALL.md](INSTALL.md) | AI 에이전트(와 사람)를 위한 플러그인 설치 안내: 준비물, 계획 확인, 동의, 설치, 검증, 제거, 문제 해결 | v1.0, 격리 환경에서 검증 |
+| [AGENTS.md](AGENTS.md) | 이 저장소에서 일하는 AI 에이전트를 위한 규칙(설치 안내 링크, 코드 변경 규칙) | v1.0 |
 | [docs/PLUGIN.md](docs/PLUGIN.md) | Claude Code 플러그인: 구성, 번들링 이유, 설치, 설정, 주의점 | v0.1, 실제 세션으로 검증 |
 | [docs/ACL.md](docs/ACL.md) | acl.json 규칙, 검사 위치, 파일이 잘못됐을 때의 동작, 한계 | v1.0 |
 | [docs/SDK.md](docs/SDK.md) | 새로운 종류의 에이전트 붙이기(MCP, SDK, CLI, 로컬 API), 보안 규칙 | v1.0 |
@@ -91,9 +101,11 @@ AI_SendMessage/
 │  ├─ adapters/   common(신원, 메시지 형식, 세션), mcp(MCP 서버), claude(hooks, 설정 생성)
 │  ├─ test/       P1~P4 테스트와 실제 Claude 종단 테스트(e2e-claude.ts, e2e-interactive.ts)
 │  └─ p0/         P0 채널 MCP 서버와 자체 테스트(선택 어댑터)
+├─ INSTALL.md     AI 에이전트용 설치 안내
+├─ AGENTS.md, CLAUDE.md  저장소 작업 규칙(CLAUDE.md는 AGENTS.md를 가져옴)
 ├─ plugin/agentlink/  Claude Code 플러그인(매니페스트, bin, 번들 dist)
 ├─ .claude-plugin/    플러그인 마켓플레이스 정의
-├─ scripts/           build-plugin.mjs(번들 빌드)
+├─ scripts/           build-plugin.mjs(번들 빌드), install.mjs(플러그인 설치 스크립트)
 └─ docs/
    ├─ RFP.md        요구사항 정의서
    ├─ LOCAL-API.md  로컬 API 명세

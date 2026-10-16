@@ -34,6 +34,8 @@
 
 ## 3. 설치
 
+AI 에이전트나 사람이 따라 하기 쉬운 안내는 저장소 루트의 [INSTALL.md](../INSTALL.md)에 있고, 같은 일을 하는 스크립트 `node scripts/install.mjs`(계획만 출력, `--yes`로 설치, `--uninstall`로 제거)가 있다. 아래는 그 배경 설명이다.
+
 설치는 사용자 설정(`~/.claude`)을 바꾸므로 직접 실행한다. 이 저장소가 곧 마켓플레이스다(`.claude-plugin/marketplace.json`). 번들(`dist/`)이 저장소에 커밋되어 있어 따로 빌드할 필요가 없다.
 
 ```
