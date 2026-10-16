@@ -55,18 +55,14 @@ export interface OutboxRow {
 
 export type NewMessage = Omit<MessageRow, 'seq' | 'state'>
 
-function plain<T>(row: unknown): T {
-  return { ...(row as object) } as T
-}
-
-export class Store {
-  private db: DatabaseSync
-
-  constructor(file: string) {
-    this.db = new DatabaseSync(file)
-    this.db.exec('PRAGMA journal_mode = WAL')
-    this.db.exec('PRAGMA busy_timeout = 3000')
-    this.db.exec(`
+/**
+ * Schema versions are kept in the database (PRAGMA user_version).
+ *   1  the tables below: everything written before versions existed has exactly this schema, so a database without a version is opened as 1.
+ *   n  MIGRATIONS[n - 2] has been applied on top of version n - 1.
+ * A change to the schema is a new entry at the end of MIGRATIONS (never an edit of BASE_SCHEMA or of an earlier entry), so that a database
+ * written by an older release is upgraded in place when the daemon of a newer release opens it.
+ */
+const BASE_SCHEMA = `
       CREATE TABLE IF NOT EXISTS agents (
         agent TEXT PRIMARY KEY,
         key TEXT NOT NULL UNIQUE,
@@ -119,7 +115,54 @@ export class Store {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (requester, target)
       );
-    `)
+    `
+
+const MIGRATIONS: string[] = []
+
+export const SCHEMA_VERSION = 1 + MIGRATIONS.length
+
+function plain<T>(row: unknown): T {
+  return { ...(row as object) } as T
+}
+
+export class Store {
+  private db: DatabaseSync
+
+  constructor(file: string) {
+    this.db = new DatabaseSync(file)
+    this.db.exec('PRAGMA journal_mode = WAL')
+    this.db.exec('PRAGMA busy_timeout = 3000')
+    try {
+      this.migrate()
+    } catch (e) {
+      this.db.close() // a refused or failed database must not stay locked by this process
+      throw e
+    }
+  }
+
+  /** Brings the database to SCHEMA_VERSION. A database from a newer release is refused rather than guessed at. */
+  private migrate(): void {
+    const version = (): number => Number((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+    let v = version()
+    if (v > SCHEMA_VERSION) {
+      throw new Error(`the database has schema version ${v} but this daemon only knows up to ${SCHEMA_VERSION}: it was written by a newer AgentLink, update before using it`)
+    }
+    if (v === 0) {
+      this.db.exec(BASE_SCHEMA) // a new database, or one from before versions existed (the statements then change nothing)
+      this.db.exec('PRAGMA user_version = 1')
+      v = 1
+    }
+    for (; v < SCHEMA_VERSION; v++) {
+      this.db.exec('BEGIN')
+      try {
+        this.db.exec(MIGRATIONS[v - 1])
+        this.db.exec(`PRAGMA user_version = ${v + 1}`)
+        this.db.exec('COMMIT')
+      } catch (e) {
+        this.db.exec('ROLLBACK')
+        throw e
+      }
+    }
   }
 
   close(): void {
