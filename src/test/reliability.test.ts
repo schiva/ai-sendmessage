@@ -52,6 +52,8 @@ test('a database from before versions existed is opened as it is, with its data,
   const store = new Store(file)
   assert.equal(store.getAgent('ag_1')?.name, 'alice', 'existing rows survive')
   assert.equal(store.getOutbox('out-1')?.peer, 'pc-b')
+  assert.equal(store.getOutbox('out-1')?.attempts, 0, 'a row from before the migration starts with no attempts')
+  assert.equal(store.getOutbox('out-1')?.next_try_ms, 0)
   store.close()
   assert.equal(userVersion(file), SCHEMA_VERSION)
 
@@ -149,4 +151,81 @@ test('removing the LAN configuration stops the retries', async () => {
   await reload()
   assert.equal((await peersStatus()).listen_retry_s, null, 'no listener wanted any more: no retry')
   await new Promise<void>(resolve => blocker.close(() => resolve()))
+})
+
+// --- D2: a passing refusal does not lose the message ---------------------------------------------
+
+import { pair, reg, send, take } from './lan-harness.ts'
+
+async function outboxCount(n: Awaited<ReturnType<typeof makeNode>>, peer: string): Promise<number> {
+  return ((await status(n)) as unknown as { peers: Array<{ host: string; queued: number }> }).peers.find(p => p.host === peer)?.queued ?? -1
+}
+
+test('messages the other host refuses for its rate limit are sent again and arrive exactly once', async () => {
+  const tx = await makeNode('pc-r1', { AGENTLINK_RETRY_BASE_MS: '100', AGENTLINK_RETRY_MAX_ATTEMPTS: '12' })
+  const rx = await makeNode('pc-r2', { AGENTLINK_RATE_BURST: '1', AGENTLINK_RATE_PER_MIN: '60' }) // one message from a host per second
+  try {
+    await start(tx)
+    await start(rx)
+    await pair(tx, rx)
+    const alice = await reg(tx, 'alice')
+    const bob = await reg(rx, 'bob')
+
+    const results = await Promise.all(['m1', 'm2', 'm3'].map(m => send(tx, alice.agent, 'bob@pc-r2', m)))
+    for (const r of results) assert.ok(['stored', 'queued_remote'].includes(r.status), `not an error: ${r.status}`)
+
+    const got: string[] = []
+    await until(async () => {
+      for (const m of await take(rx, bob.agent)) got.push(m.message)
+      return got.length >= 3
+    }, 20_000, 'all three messages at the receiver')
+    assert.deepEqual([...got].sort(), ['m1', 'm2', 'm3'], 'each exactly once')
+    await until(async () => (await outboxCount(tx, 'pc-r2')) === 0, 5000, 'the outbox to drain')
+    assert.deepEqual(await take(tx, alice.agent), [], 'no delivery notice: nothing was lost')
+  } finally {
+    await stop(tx)
+    await stop(rx)
+  }
+})
+
+test('a message that keeps being refused is dropped after the attempts with a notice, not retried for ever', async () => {
+  const tx = await makeNode('pc-r3', { AGENTLINK_RETRY_BASE_MS: '50', AGENTLINK_RETRY_MAX_ATTEMPTS: '3' })
+  const rx = await makeNode('pc-r4', { AGENTLINK_RATE_BURST: '1', AGENTLINK_RATE_PER_MIN: '1' }) // practically no refill during the test
+  try {
+    await start(tx)
+    await start(rx)
+    await pair(tx, rx)
+    const alice = await reg(tx, 'alice')
+    const bob = await reg(rx, 'bob')
+    await send(tx, alice.agent, 'bob@pc-r4', 'first')
+    await send(tx, alice.agent, 'bob@pc-r4', 'second').catch(() => {})
+    const notices: string[] = []
+    await until(async () => {
+      for (const m of await take(tx, alice.agent)) notices.push(m.message)
+      return notices.length > 0
+    }, 15_000, 'the delivery notice')
+    assert.match(notices[0], /could not be delivered/)
+    assert.match(notices[0], /gave up after 3 attempts/)
+    assert.equal(await outboxCount(tx, 'pc-r4'), 0, 'nothing is left to retry')
+    assert.deepEqual((await take(rx, bob.agent)).map(m => m.message), ['first'], 'only the accepted message arrived')
+  } finally {
+    await stop(tx)
+    await stop(rx)
+  }
+})
+
+test('a final refusal is not retried: an unknown agent is reported at once and leaves nothing behind', async () => {
+  const tx = await makeNode('pc-r5', { AGENTLINK_RETRY_BASE_MS: '50' })
+  const rx = await makeNode('pc-r6')
+  try {
+    await start(tx)
+    await start(rx)
+    await pair(tx, rx)
+    const alice = await reg(tx, 'alice')
+    await assert.rejects(send(tx, alice.agent, 'nobody@pc-r6', 'hello'), /UNKNOWN_AGENT|no agent named/)
+    assert.equal(await outboxCount(tx, 'pc-r6'), 0)
+  } finally {
+    await stop(tx)
+    await stop(rx)
+  }
 })

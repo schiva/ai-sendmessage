@@ -58,7 +58,18 @@ interface Dialer {
 
 interface Pending {
   resolve: () => void
+  /** The other host refused for a passing reason: the message stays queued and is sent again. */
+  queue: () => void
   reject: (e: Error) => void
+}
+
+/** Refusals that pass: the same message is accepted later. Every other error is final, and an unknown one is treated as final too. */
+const TRANSIENT_CODES = new Set<string>(['RATE_LIMITED'])
+/** After a retry was sent, wait this long for its answer before it counts as due again (the answer normally takes milliseconds). */
+const RETRY_ANSWER_WAIT_MS = 30_000
+
+export function retryDelayMs(attempts: number, baseMs: number): number {
+  return Math.min(baseMs * 2 ** Math.max(0, attempts - 1), 60_000)
 }
 
 type PairOutcome = 'waiting' | 'paired' | 'expired' | 'cancelled' | 'failed'
@@ -194,6 +205,10 @@ export class PeerManager implements RemoteGateway {
           clearTimeout(timer)
           resolve('stored')
         },
+        queue: () => {
+          clearTimeout(timer)
+          resolve('queued_remote')
+        },
         reject: e => {
           clearTimeout(timer)
           reject(e)
@@ -273,8 +288,9 @@ export class PeerManager implements RemoteGateway {
     await this.stopListener()
   }
 
-  /** Called periodically by the daemon: expires undeliverable messages. */
+  /** Called periodically by the daemon: sends refused messages again when their time has come, and expires undeliverable ones. */
   sweep(): void {
+    this.retryDue()
     const expired = this.store.outboxExpired(Date.now() - this.cfg.outboxTtlMs)
     for (const row of expired) {
       this.store.deleteOutbox(row.id)
@@ -704,7 +720,9 @@ export class PeerManager implements RemoteGateway {
   }
 
   private flush(link: Link): void {
+    const now = Date.now()
     for (const row of this.store.outboxForPeer(link.host)) {
+      if (row.next_try_ms > now) continue // refused a moment ago: its own retry time decides
       try {
         link.ws.send(row.frame)
       } catch {
@@ -735,19 +753,45 @@ export class PeerManager implements RemoteGateway {
     }
   }
 
+  /** Sends the refused messages whose retry time has come over the links that are up. */
+  private retryDue(): void {
+    const now = Date.now()
+    for (const link of this.links.values()) {
+      for (const row of this.store.outboxDue(link.host, now)) {
+        try {
+          link.ws.send(row.frame)
+        } catch {
+          break
+        }
+        // If the answer never comes (the link broke), try again after a while; an answer sets the real time or removes the message.
+        this.store.retryOutbox(row.id, row.attempts, now + RETRY_ANSWER_WAIT_MS)
+      }
+    }
+  }
+
   private onAck(host: string, f: Record<string, unknown>): void {
     const id = typeof f.id === 'string' ? f.id : ''
     const row = this.store.getOutbox(id)
     if (!row || row.peer !== host) return
-    this.store.deleteOutbox(id)
     const waiter = this.pending.get(id)
     this.pending.delete(id)
     if (f.status === 'stored') {
+      this.store.deleteOutbox(id)
       waiter?.resolve()
       return
     }
     const code = (typeof f.code === 'string' && KNOWN_CODES.has(f.code) ? f.code : 'INTERNAL') as ErrorCode
-    const message = typeof f.message === 'string' ? f.message.slice(0, 300) : 'delivery failed'
+    let message = typeof f.message === 'string' ? f.message.slice(0, 300) : 'delivery failed'
+    if (TRANSIENT_CODES.has(code)) {
+      const attempts = row.attempts + 1
+      if (attempts < this.cfg.retryMaxAttempts) {
+        this.store.retryOutbox(id, attempts, Date.now() + retryDelayMs(attempts, this.cfg.retryBaseMs))
+        waiter?.queue()
+        return
+      }
+      message = `${message} (gave up after ${attempts} attempts)`
+    }
+    this.store.deleteOutbox(id)
     if (waiter) waiter.reject(new ApiError(code, `${message} (reported by ${host})`))
     else this.core.deliverNotice(row.sender_agent, `Message to ${row.to_display} could not be delivered: ${code}: ${message}`)
   }

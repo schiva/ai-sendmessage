@@ -51,7 +51,13 @@ export interface OutboxRow {
   sender_agent: string
   to_display: string
   created_ms: number
+  /** How often the other host has refused it for a passing reason. */
+  attempts: number
+  /** Not before this time (ms) is it sent again; 0 when there is nothing to wait for. */
+  next_try_ms: number
 }
+
+export type NewOutbox = Omit<OutboxRow, 'attempts' | 'next_try_ms'>
 
 export type NewMessage = Omit<MessageRow, 'seq' | 'state'>
 
@@ -117,7 +123,10 @@ const BASE_SCHEMA = `
       );
     `
 
-const MIGRATIONS: string[] = []
+const MIGRATIONS: string[] = [
+  // 2: a refused message that is worth sending again keeps count of its attempts and the time of the next one
+  'ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0; ALTER TABLE outbox ADD COLUMN next_try_ms INTEGER NOT NULL DEFAULT 0;',
+]
 
 export const SCHEMA_VERSION = 1 + MIGRATIONS.length
 
@@ -284,7 +293,7 @@ export class Store {
 
   // --- outbox (messages for other hosts that are not acknowledged yet) ----------
 
-  insertOutbox(r: OutboxRow): void {
+  insertOutbox(r: NewOutbox): void {
     this.db
       .prepare('INSERT OR REPLACE INTO outbox (id,peer,frame,sender_agent,to_display,created_ms) VALUES (?,?,?,?,?,?)')
       .run(r.id, r.peer, r.frame, r.sender_agent, r.to_display, r.created_ms)
@@ -293,6 +302,16 @@ export class Store {
   getOutbox(id: string): OutboxRow | undefined {
     const r = this.db.prepare('SELECT * FROM outbox WHERE id=?').get(id)
     return r ? plain<OutboxRow>(r) : undefined
+  }
+
+  /** Records another attempt: the message stays in the outbox and is not sent again before nextTryMs. */
+  retryOutbox(id: string, attempts: number, nextTryMs: number): void {
+    this.db.prepare('UPDATE outbox SET attempts=?, next_try_ms=? WHERE id=?').run(attempts, nextTryMs, id)
+  }
+
+  /** Messages that were refused for a passing reason and whose time to try again has come. */
+  outboxDue(peer: string, now: number): OutboxRow[] {
+    return this.db.prepare('SELECT * FROM outbox WHERE peer=? AND attempts>0 AND next_try_ms<=? ORDER BY created_ms, id').all(peer, now).map(r => plain<OutboxRow>(r))
   }
 
   outboxForPeer(peer: string): OutboxRow[] {
