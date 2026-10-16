@@ -18,7 +18,7 @@ Claude Code에 이렇게 말하면 저장소만 보고 플러그인을 설치합
 
 ## 현재 상태
 
-버전 0.2.1. P0~P4와 Claude Code 플러그인이 구현되어 있고 전체 107개 테스트(`npm test`)가 통과합니다. 실제 두 PC(Windows 11)에서 연결, 양방향 메시지, 쉬는 세션 깨우기를 확인했습니다. 설계는 [RFP](docs/RFP.md) v0.2를 따르고, 확정된 전제는 Windows 11 최대 5대, 정적 `peers.json`, 로컬 명명된 파이프, 에이전트 중립 구조입니다.
+버전 0.3.0. P0~P4와 Claude Code 플러그인이 구현되어 있고 전체 148개 테스트(`npm test`)가 통과합니다. 실제 두 PC(Windows 11)에서 연결, 양방향 메시지, 쉬는 세션 깨우기를 확인했습니다. 설계는 [RFP](docs/RFP.md) v0.2를 따르고, 확정된 전제는 Windows 11 최대 5대, 정적 `peers.json`, 로컬 명명된 파이프, 에이전트 중립 구조입니다.
 
 - **P0** (Claude 채널 주입 스파이크): 서버 쪽 테스트는 통과했지만, 이 계정에서는 채널이 조직 정책으로 막혀 세션 주입을 확인하지 못했습니다. 채널은 선택 어댑터로 내렸습니다. 자세한 내용은 [docs/P0.md](docs/P0.md).
 - **P1** (agentd 코어와 `agentctl`): 완료. 같은 PC에서 에이전트 등록, 이름 주소 전송, 영속 inbox, ack, idle 알림, 자동 기동이 동작하고 테스트 20개가 통과합니다.
@@ -27,11 +27,12 @@ Claude Code에 이렇게 말하면 저장소만 보고 플러그인을 설치합
 - **P4** (ACL, 원격 idle 알림, 다른 종류의 에이전트): 구현 완료. `acl.json`으로 누가 누구에게 보낼 수 있는지 정하고([docs/ACL.md](docs/ACL.md)), 다른 PC의 에이전트가 idle이 되면 알림을 받을 수 있으며, Claude가 아닌 에이전트를 SDK나 MCP 어댑터로 붙일 수 있습니다([docs/SDK.md](docs/SDK.md)). 테스트 70개와 실제 Claude 세션 종단 테스트가 통과했습니다.
 - **플러그인**: Claude Code 어댑터를 플러그인으로 포장했습니다(`plugin/agentlink/`). 설치하면 hooks, MCP 서버, `agentctl`이 한 번에 들어옵니다. 번들이라 저장소나 `npm install`이 없어도 동작합니다. 자세한 내용은 [docs/PLUGIN.md](docs/PLUGIN.md). 실제 세션 종단 테스트(`npm run e2e:plugin`)가 통과했습니다. 버전은 `package.json` 하나가 기준이고, 올리면 `claude plugin update`로 갱신됩니다.
 - **쉬는 세션 깨우기**: 훅은 입력, 도구 호출, 턴 종료 때만 돌아서 쉬는 세션은 메시지를 못 봅니다. 그래서 세션 시작 때 `agentctl wake`를 백그라운드로 띄우게 안내합니다. 이 감시기는 메시지를 읽거나 출력하지 않고 기다리다가, 메시지가 오면 종료해서 세션을 깨웁니다(10분에 10회 상한, 같은 순간의 메시지는 한 번에). 세션이 직접 띄워야 하므로 보장은 아닙니다. `AGENTLINK_NO_WAKE=1`로 끕니다. [INSTALL.md](INSTALL.md)와 [RFP](docs/RFP.md) D-09.
+- **안정성(0.3.0)**: 수신 포트를 열지 못해도(포트 사용 중, IP 변경) 데몬이 죽지 않고 다시 시도하며, 상대의 일시적 거부(속도 제한)로 메시지가 사라지지 않고 다시 전송되고, DB에 스키마 버전이 생겨 이후 업데이트가 기존 데이터를 안전하게 올립니다. 다른 PC에는 작업 폴더의 이름만 알리고, 로그는 크기를 제한하며, 하트비트가 `stop`한 데몬을 되살리지 않습니다. 자세한 내용은 [docs/LOCAL-API.md](docs/LOCAL-API.md) 7.9절과 [docs/LAN.md](docs/LAN.md).
 - **다음**: 실제 두 PC에서 남은 검증(방화벽 규칙 없음, 큐 만료, 세 대 이상), 외부 AI 도구(Codex CLI, Gemini CLI 등)와의 실제 연동 시험, P5(5대 구성 점검, 운영 문서).
 
 ### 다른 PC와 연결하기
 
-한 PC에서 `agentctl pair`로 코드를 만들고, 다른 PC에서 `agentctl pair <코드>`를 실행하면 설정이 끝납니다. 이후 `bob@pc-b`처럼 호스트를 붙여 보내면 됩니다. 수동으로 하려면 `%LOCALAPPDATA%\AgentLink\peers.json`에 상대 PC의 이름, IP, 공유 토큰, 인증서 지문을 적고 `agentctl peers reload`를 실행합니다. 자세한 절차와 방화벽 설정은 [docs/LAN.md](docs/LAN.md)를 보세요.
+먼저 코드를 만드는(포트를 여는) PC의 Windows 방화벽에 TCP 7420 수신 허용 규칙이 있어야 합니다. 이 프로그램이 대신 만들지 않으므로 관리자 PowerShell에서 한 번 직접 만드세요(명령과 확인 방법은 [docs/LAN.md](docs/LAN.md) 2절의 "방화벽 규칙"). 그다음 한 PC에서 `agentctl pair`로 코드를 만들고, 다른 PC에서 `agentctl pair <코드>`를 실행하면 설정이 끝납니다. 이후 `bob@pc-b`처럼 호스트를 붙여 보내면 됩니다. 수동으로 하려면 `%LOCALAPPDATA%\AgentLink\peers.json`에 상대 PC의 이름, IP, 공유 토큰, 인증서 지문을 적고 `agentctl peers reload`를 실행합니다. 자세한 절차와 방화벽 설정은 [docs/LAN.md](docs/LAN.md)를 보세요.
 
 ### Claude Code에 플러그인으로 설치하기 (권장)
 

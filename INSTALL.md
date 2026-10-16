@@ -108,7 +108,11 @@ starts the daemon and prints its host name.
   The watcher ends silently when its Claude process is gone and after 12 hours. Without the watcher an idle session receives messages with its next
   input. Set `AGENTLINK_NO_WAKE=1` to turn the instruction off.
 - `agentctl` (from the plugin's `bin/`) is on the PATH of Claude's Bash tool: `agentctl list`, `agentctl peers`.
-- To connect another PC, run `agentctl pair` on one PC and `agentctl pair <code>` on the other (see [docs/LAN.md](docs/LAN.md)). To restrict who may message whom, see
+- To connect another PC, run `agentctl pair` on one PC and `agentctl pair <code>` on the other (see [docs/LAN.md](docs/LAN.md)).
+  **The PC that makes the code (the one that listens) needs a Windows Firewall rule that allows inbound TCP 7420 from the other PC**;
+  without it the other PC cannot connect. Nothing creates it for you: run, once in an administrator PowerShell,
+  `New-NetFirewallRule -DisplayName "AgentLink" -Direction Inbound -Protocol TCP -LocalPort 7420 -RemoteAddress <IP of the other PC> -Action Allow`.
+  `agentctl pair` prints this command when it finds no rule whose name starts with `AgentLink`. To restrict who may message whom, see
   [docs/ACL.md](docs/ACL.md).
 
 ## 6. Update
@@ -135,7 +139,11 @@ Then, **in this order**:
 
 Why the order matters: a daemon that is stopped while an old-version component is still running comes back as the old version,
 because that component starts it again. This happens with the MCP server of a session that was not reloaded, and with idle
-watchers of version 0.2.0 and older. Watchers of 0.2.1 and later never start a daemon.
+watchers of version 0.2.0 and older. Watchers of 0.2.1 and later never start a daemon. From 0.3.0 on, the heartbeat and the
+reconnecting of a session's MCP server do not start a daemon either (only a real tool call or a hook does), so a `stop` is no
+longer undone by a session that was not reloaded. Updating **from** 0.2.x to 0.3.0 still needs the order above: until a session is
+reloaded it runs the old MCP server. Hooks now give up after 15 s (they used to after 10 s) and wait at most 5 s for a daemon to
+start, so a hook never outlasts its timeout.
 
 If `plugin update` says "already at the latest version" although the repository has newer commits, those commits did not change
 the version number: uninstall and install the plugin again (step 7, then step 3).

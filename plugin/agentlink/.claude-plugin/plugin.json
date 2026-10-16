@@ -1,7 +1,7 @@
 {
   "name": "agentlink",
   "displayName": "AgentLink",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Lets this Claude Code session exchange messages with other AI agents on this PC and on other PCs of the LAN.",
   "author": { "name": "AI_SendMessage project" },
   "keywords": ["agents", "messaging", "lan", "multi-agent"],

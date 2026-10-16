@@ -1,6 +1,6 @@
 {
   "name": "ai-sendmessage",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "LAN extension of Claude Code SendMessage (see docs/RFP.md)",
@@ -12,7 +12,7 @@
     "p0:test": "node src/p0/selftest.ts",
     "agentd": "node src/agentd/main.ts",
     "agentctl": "node --no-warnings src/client/agentctl.ts",
-    "test": "node --no-warnings --test src/test/p1.test.ts src/test/p2.test.ts src/test/p3.test.ts src/test/p4.test.ts src/test/pair.test.ts src/test/wake.test.ts src/test/reliability.test.ts src/test/p5-plugin.test.ts src/test/install-script.test.ts",
+    "test": "node --no-warnings --test src/test/p1.test.ts src/test/p2.test.ts src/test/p3.test.ts src/test/p4.test.ts src/test/pair.test.ts src/test/wake.test.ts src/test/reliability.test.ts src/test/session-resilience.test.ts src/test/p5-plugin.test.ts src/test/install-script.test.ts",
     "claude:config": "node --no-warnings src/adapters/claude/print-config.ts",
     "mcp:server": "node --no-warnings src/adapters/mcp/server.ts",
     "e2e:claude": "node --no-warnings src/test/e2e-claude.ts",

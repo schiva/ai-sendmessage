@@ -22828,7 +22828,7 @@ var require_selfsigned = __commonJS({
 });
 
 // src/agentd/main.ts
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import path5 from "node:path";
 import { randomBytes as randomBytes3 } from "node:crypto";
 
@@ -22866,7 +22866,11 @@ function loadConfig() {
     peerPingMs: num("AGENTLINK_PEER_PING_MS", 1e4),
     ackWaitMs: num("AGENTLINK_ACK_WAIT_MS", 2e3),
     outboxTtlMs: num("AGENTLINK_OUTBOX_TTL_MS", 24 * 60 * 60 * 1e3),
-    directoryMs: num("AGENTLINK_DIRECTORY_MS", 3e3)
+    directoryMs: num("AGENTLINK_DIRECTORY_MS", 3e3),
+    listenRetryMs: num("AGENTLINK_LISTEN_RETRY_MS", 15e3),
+    retryBaseMs: num("AGENTLINK_RETRY_BASE_MS", 2e3),
+    retryMaxAttempts: num("AGENTLINK_RETRY_MAX_ATTEMPTS", 8),
+    shareFullCwd: process.env.AGENTLINK_SHARE_FULL_CWD === "1"
   };
 }
 
@@ -22902,9 +22906,14 @@ var ApiError = class extends Error {
 };
 
 // src/version.ts
-var VERSION = true ? "0.2.3" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.3.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 // src/agentd/core.ts
+function folderName(path6) {
+  if (path6 === null) return null;
+  const parts = path6.split(/[\\/]+/).filter((part) => part !== "");
+  return parts.length > 0 ? parts[parts.length - 1] : null;
+}
 function str(p, name, opts = {}) {
   const v = p[name];
   if (v === void 0 || v === null) {
@@ -23219,14 +23228,14 @@ var Core = class {
     if (!a) return;
     this.deliver(a, { from: `agentlink@${this.host}`, kind: "delivery_notice", summary: text.slice(0, LIMITS.maxSummaryChars), message: text, reply_to: null }, true);
   }
-  /** What this host tells its peers about its agents. */
+  /** What this host tells its peers about its agents. The working directory is reduced to its folder name: a full path shows user names and layout. */
   localDirectory() {
     return this.store.allAgents().filter((a) => a.active === 1).map((a) => ({
       name: a.name,
       ref: a.ref,
       kind: a.kind,
       status: this.statusOf(a),
-      cwd: a.cwd,
+      cwd: this.cfg.shareFullCwd ? a.cwd : folderName(a.cwd),
       unread: this.store.countState(a.agent, "new"),
       last_seen: Math.floor(a.last_seen / 1e3)
     }));
@@ -23599,15 +23608,20 @@ function proofMatches(given, expected) {
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-function lanAddresses() {
-  const out = [];
-  for (const addrs of Object.values(os2.networkInterfaces())) {
+var VIRTUAL_ADAPTER = /vethernet|wsl|hyper-v|virtualbox|vbox|vmware|docker|loopback|bluetooth|tailscale|zerotier|hamachi|vpn|\btap\b|\btun\b/i;
+function isPrivateIpv4(ip) {
+  const [a, b] = ip.split(".").map(Number);
+  return a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168;
+}
+function lanAddresses(ifaces = os2.networkInterfaces()) {
+  const found = [];
+  for (const [name, addrs] of Object.entries(ifaces)) {
     for (const a of addrs ?? []) {
       if (a.family !== "IPv4" || a.internal || a.address.startsWith("169.254.")) continue;
-      out.push(a.address);
+      found.push({ address: a.address, rank: (isPrivateIpv4(a.address) ? 0 : 1) + (VIRTUAL_ADAPTER.test(name) ? 2 : 0) });
     }
   }
-  return out;
+  return found.map((f, i) => ({ ...f, i })).sort((x, y) => x.rank - y.rank || x.i - y.i).map((f) => f.address);
 }
 
 // src/agentd/peers.ts
@@ -23627,6 +23641,11 @@ var KNOWN_CODES = /* @__PURE__ */ new Set([
   "LOOP_DETECTED",
   "INTERNAL"
 ]);
+var TRANSIENT_CODES = /* @__PURE__ */ new Set(["RATE_LIMITED"]);
+var RETRY_ANSWER_WAIT_MS = 3e4;
+function retryDelayMs(attempts, baseMs) {
+  return Math.min(baseMs * 2 ** Math.max(0, attempts - 1), 6e4);
+}
 var isWildcard = (h) => h === "0.0.0.0" || h === "::";
 function tokenMatches(given, expected) {
   if (typeof given !== "string") return false;
@@ -23683,6 +23702,10 @@ var PeerManager = class {
   listenError = null;
   directoryTimer = null;
   pairing = null;
+  listenRetry = null;
+  listenRetryAt = null;
+  lastListenFailure = "";
+  stopped = false;
   constructor(opts) {
     this.core = opts.core;
     this.store = opts.store;
@@ -23732,6 +23755,10 @@ var PeerManager = class {
           clearTimeout(timer);
           resolve("stored");
         },
+        queue: () => {
+          clearTimeout(timer);
+          resolve("queued_remote");
+        },
         reject: (e) => {
           clearTimeout(timer);
           reject(e);
@@ -23753,6 +23780,7 @@ var PeerManager = class {
       fingerprint: displayFingerprint(this.tls.fingerprint),
       listening: this.listening,
       listen_error: this.listenError,
+      listen_retry_s: this.listenRetryAt === null ? null : Math.max(0, Math.ceil((this.listenRetryAt - Date.now()) / 1e3)),
       config_errors: this.config.errors,
       peers: this.hosts()
     };
@@ -23777,6 +23805,7 @@ var PeerManager = class {
       await this.stopListener();
       if (want) await this.startListener(want);
     }
+    this.scheduleListenRetry();
     if (next.peers.length > 0 && !this.directoryTimer) {
       this.directoryTimer = setInterval(() => this.broadcastDirectory(), this.cfg.directoryMs);
       this.directoryTimer.unref();
@@ -23788,6 +23817,10 @@ var PeerManager = class {
     for (const e of next.errors) this.log(`peers.json: ${e}`);
   }
   async stop() {
+    this.stopped = true;
+    if (this.listenRetry) clearTimeout(this.listenRetry);
+    this.listenRetry = null;
+    this.listenRetryAt = null;
     if (this.pairing) clearTimeout(this.pairing.timer);
     if (this.directoryTimer) clearInterval(this.directoryTimer);
     this.directoryTimer = null;
@@ -23795,8 +23828,9 @@ var PeerManager = class {
     for (const l of this.links.values()) l.ws.terminate();
     await this.stopListener();
   }
-  /** Called periodically by the daemon: expires undeliverable messages. */
+  /** Called periodically by the daemon: sends refused messages again when their time has come, and expires undeliverable ones. */
   sweep() {
+    this.retryDue();
     const expired = this.store.outboxExpired(Date.now() - this.cfg.outboxTtlMs);
     for (const row of expired) {
       this.store.deleteOutbox(row.id);
@@ -23832,7 +23866,8 @@ var PeerManager = class {
     timer.unref();
     this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1e3, failures: 0, state: "waiting", host: null, detail: null, timer };
     this.log(`pairing opened on ${address}:${port} for ${ttlS}s`);
-    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost };
+    const others = lanAddresses().filter((a) => a !== address);
+    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost, other_addresses: others };
   }
   pairStatus() {
     const p = this.pairing;
@@ -23950,9 +23985,13 @@ var PeerManager = class {
       const server2 = https.createServer({ key: this.tls.key, cert: this.tls.cert, minVersion: "TLSv1.2" });
       const wss = new import_websocket_server.default({ server: server2, maxPayload: MAX_FRAME });
       wss.on("connection", (ws) => this.bind(ws, "peer", null));
+      wss.on("error", () => {
+      });
       server2.once("error", (e) => {
         this.listenError = `${e.code ?? "error"}: ${e.message}`;
-        this.log(`listener ${l.host}:${l.port} failed: ${this.listenError}`);
+        const failure = `listener ${l.host}:${l.port} failed: ${this.listenError}`;
+        if (failure !== this.lastListenFailure) this.log(failure);
+        this.lastListenFailure = failure;
         wss.close();
         resolve();
       });
@@ -23961,10 +24000,30 @@ var PeerManager = class {
         this.wss = wss;
         this.listening = { host: l.host, port: server2.address().port };
         this.listenError = null;
+        this.lastListenFailure = "";
         this.log(`listening for peers on ${l.host}:${this.listening.port}`);
         resolve();
       });
     });
+  }
+  /**
+   * peers.json asks for a LAN port but it is not open (the address is not up yet after a boot or a network change, or the port is busy):
+   * try again every listenRetryMs until it opens, instead of staying closed until someone reloads or restarts.
+   */
+  scheduleListenRetry() {
+    if (this.listenRetry) clearTimeout(this.listenRetry);
+    this.listenRetry = null;
+    this.listenRetryAt = null;
+    if (this.stopped || !this.config.listen || this.listening) return;
+    this.listenRetryAt = Date.now() + this.cfg.listenRetryMs;
+    this.listenRetry = setTimeout(() => {
+      this.listenRetry = null;
+      this.listenRetryAt = null;
+      const want = this.config.listen;
+      if (this.stopped || !want || this.listening) return;
+      void this.startListener(want).then(() => this.scheduleListenRetry());
+    }, this.cfg.listenRetryMs);
+    this.listenRetry.unref();
   }
   stopListener() {
     const server2 = this.httpsServer;
@@ -24167,7 +24226,9 @@ var PeerManager = class {
     for (const l of this.links.values()) this.sendDirectory(l);
   }
   flush(link) {
+    const now = Date.now();
     for (const row of this.store.outboxForPeer(link.host)) {
+      if (row.next_try_ms > now) continue;
       try {
         link.ws.send(row.frame);
       } catch {
@@ -24195,19 +24256,43 @@ var PeerManager = class {
     } catch {
     }
   }
+  /** Sends the refused messages whose retry time has come over the links that are up. */
+  retryDue() {
+    const now = Date.now();
+    for (const link of this.links.values()) {
+      for (const row of this.store.outboxDue(link.host, now)) {
+        try {
+          link.ws.send(row.frame);
+        } catch {
+          break;
+        }
+        this.store.retryOutbox(row.id, row.attempts, now + RETRY_ANSWER_WAIT_MS);
+      }
+    }
+  }
   onAck(host, f) {
     const id = typeof f.id === "string" ? f.id : "";
     const row = this.store.getOutbox(id);
     if (!row || row.peer !== host) return;
-    this.store.deleteOutbox(id);
     const waiter = this.pending.get(id);
     this.pending.delete(id);
     if (f.status === "stored") {
+      this.store.deleteOutbox(id);
       waiter?.resolve();
       return;
     }
     const code = typeof f.code === "string" && KNOWN_CODES.has(f.code) ? f.code : "INTERNAL";
-    const message = typeof f.message === "string" ? f.message.slice(0, 300) : "delivery failed";
+    let message = typeof f.message === "string" ? f.message.slice(0, 300) : "delivery failed";
+    if (TRANSIENT_CODES.has(code)) {
+      const attempts = row.attempts + 1;
+      if (attempts < this.cfg.retryMaxAttempts) {
+        this.store.retryOutbox(id, attempts, Date.now() + retryDelayMs(attempts, this.cfg.retryBaseMs));
+        waiter?.queue();
+        return;
+      }
+      message = `${message} (gave up after ${attempts} attempts)`;
+    }
+    this.store.deleteOutbox(id);
     if (waiter) waiter.reject(new ApiError(code, `${message} (reported by ${host})`));
     else this.core.deliverNotice(row.sender_agent, `Message to ${row.to_display} could not be delivered: ${code}: ${message}`);
   }
@@ -24496,18 +24581,24 @@ var Acl = class {
   }
 };
 
+// src/agentd/applog.ts
+import fs4 from "node:fs";
+var DEFAULT_LOG_MAX_BYTES = 1024 * 1024;
+function appendLog(file, line, maxBytes = DEFAULT_LOG_MAX_BYTES) {
+  try {
+    try {
+      if (fs4.statSync(file).size >= maxBytes) fs4.renameSync(file, `${file}.1`);
+    } catch {
+    }
+    fs4.appendFileSync(file, line.endsWith("\n") ? line : `${line}
+`);
+  } catch {
+  }
+}
+
 // src/agentd/store.ts
 import { DatabaseSync } from "node:sqlite";
-function plain(row) {
-  return { ...row };
-}
-var Store = class {
-  db;
-  constructor(file) {
-    this.db = new DatabaseSync(file);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA busy_timeout = 3000");
-    this.db.exec(`
+var BASE_SCHEMA = `
       CREATE TABLE IF NOT EXISTS agents (
         agent TEXT PRIMARY KEY,
         key TEXT NOT NULL UNIQUE,
@@ -24560,7 +24651,51 @@ var Store = class {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (requester, target)
       );
-    `);
+    `;
+var MIGRATIONS = [
+  // 2: a refused message that is worth sending again keeps count of its attempts and the time of the next one
+  "ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0; ALTER TABLE outbox ADD COLUMN next_try_ms INTEGER NOT NULL DEFAULT 0;"
+];
+var SCHEMA_VERSION = 1 + MIGRATIONS.length;
+function plain(row) {
+  return { ...row };
+}
+var Store = class {
+  db;
+  constructor(file) {
+    this.db = new DatabaseSync(file);
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA busy_timeout = 3000");
+    try {
+      this.migrate();
+    } catch (e) {
+      this.db.close();
+      throw e;
+    }
+  }
+  /** Brings the database to SCHEMA_VERSION. A database from a newer release is refused rather than guessed at. */
+  migrate() {
+    const version = () => Number(this.db.prepare("PRAGMA user_version").get().user_version);
+    let v = version();
+    if (v > SCHEMA_VERSION) {
+      throw new Error(`the database has schema version ${v} but this daemon only knows up to ${SCHEMA_VERSION}: it was written by a newer AgentLink, update before using it`);
+    }
+    if (v === 0) {
+      this.db.exec(BASE_SCHEMA);
+      this.db.exec("PRAGMA user_version = 1");
+      v = 1;
+    }
+    for (; v < SCHEMA_VERSION; v++) {
+      this.db.exec("BEGIN");
+      try {
+        this.db.exec(MIGRATIONS[v - 1]);
+        this.db.exec(`PRAGMA user_version = ${v + 1}`);
+        this.db.exec("COMMIT");
+      } catch (e) {
+        this.db.exec("ROLLBACK");
+        throw e;
+      }
+    }
   }
   close() {
     this.db.close();
@@ -24649,6 +24784,14 @@ var Store = class {
     const r = this.db.prepare("SELECT * FROM outbox WHERE id=?").get(id);
     return r ? plain(r) : void 0;
   }
+  /** Records another attempt: the message stays in the outbox and is not sent again before nextTryMs. */
+  retryOutbox(id, attempts, nextTryMs) {
+    this.db.prepare("UPDATE outbox SET attempts=?, next_try_ms=? WHERE id=?").run(attempts, nextTryMs, id);
+  }
+  /** Messages that were refused for a passing reason and whose time to try again has come. */
+  outboxDue(peer, now) {
+    return this.db.prepare("SELECT * FROM outbox WHERE peer=? AND attempts>0 AND next_try_ms<=? ORDER BY created_ms, id").all(peer, now).map((r) => plain(r));
+  }
   outboxForPeer(peer) {
     return this.db.prepare("SELECT * FROM outbox WHERE peer=? ORDER BY created_ms, id").all(peer).map((r) => plain(r));
   }
@@ -24694,29 +24837,31 @@ var Store = class {
 
 // src/agentd/main.ts
 var home = homeDir();
-fs4.mkdirSync(home, { recursive: true });
+fs5.mkdirSync(home, { recursive: true });
 var logFile = path5.join(home, "agentd.log");
 function log(line) {
-  try {
-    fs4.appendFileSync(logFile, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
-`);
-  } catch {
-  }
+  appendLog(logFile, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}`);
 }
 function ensureToken(file) {
   try {
     const t = randomBytes3(32).toString("hex");
-    fs4.writeFileSync(file, t, { flag: "wx" });
+    fs5.writeFileSync(file, t, { flag: "wx" });
     return t;
   } catch (e) {
     if (e.code !== "EEXIST") throw e;
-    return fs4.readFileSync(file, "utf8").trim();
+    return fs5.readFileSync(file, "utf8").trim();
   }
 }
 var token = ensureToken(path5.join(home, "token"));
 var cfg = loadConfig();
 var server = await (async () => {
-  const store = new Store(path5.join(home, "agentd.db"));
+  let store;
+  try {
+    store = new Store(path5.join(home, "agentd.db"));
+  } catch (e) {
+    log(`cannot open the database: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
   const host = hostName();
   const core = new Core(store, host, cfg);
   const acl = new Acl(home, host);
