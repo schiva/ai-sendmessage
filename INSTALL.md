@@ -128,7 +128,8 @@ node scripts/install.mjs --finish-update --yes   # step 2: stop the old daemon a
 
 - Without `--yes` each step only prints its plan and changes nothing (exit code 3). `--dry-run` does the same with exit code 0, and
   `--json` gives the result as JSON (`mode`, `version_before`, `version_after`, `pending[]`, and for step 2 the daemon version).
-- If the version did not change, step 1 touches no watcher and says that you are up to date.
+- Step 1 ends the idle watchers of every agent, including the one of the session you run it in. Until that session is reloaded, its Stop hook may ask for a watcher before it goes idle: start it with the path of the new version (a watcher of 0.2.1 or later never restarts a daemon).
+- If the version did not change, step 1 touches no watcher and says that you are up to date. A plugin that is read straight from a folder (a clone used as the marketplace) has no cache to update: step 1 only ends the watchers and you reload, then run step 2.
 - Step 2 fails with a reason when a session that was not reloaded keeps bringing the old daemon back; reload or end those sessions
   and run step 2 again.
 - The script reads the state of Claude Code as JSON (`claude plugin list --json`). If that output cannot be understood it stops
@@ -149,7 +150,7 @@ Then, **in this order**:
    cleaned up, reported as "no watcher running", and the other program is left alone). It needs no daemon and starts none. Do not end watchers by matching
    process names: a pattern like `agentctl.*wake` also matches the shells that run your command.
 2. In every open Claude Code session run `/reload-plugins` (or end the session and start a new one). This replaces the session's
-   hooks and its MCP server, which are still the old version. Each session then starts a new watcher, as its SessionStart note says.
+   hooks and its MCP server, which are still the old version. A new session is told to start a watcher by its SessionStart note; a session that was reloaded does not run SessionStart again and is told by the reminder of its next prompt or by the Stop hook.
    Between step 1 and the reload, a session that is about to go idle gets a request from the Stop hook to start a watcher, and that
    request still names the old plugin path. Start it with the new version's path (`agentctl wake --agent <id>` from the updated
    plugin); a watcher of 0.2.1 or later never restarts a daemon, so this does not disturb the order.
