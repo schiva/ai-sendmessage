@@ -17,6 +17,7 @@ export class Session {
   private client: Client | null = null
   private reg: Registration | null = null
   private connecting: Promise<void> | null = null
+  private connectingAutostart = false
   private timer: NodeJS.Timeout | null = null
 
   constructor(identity: Identity) {
@@ -27,11 +28,21 @@ export class Session {
     return this.reg
   }
 
-  private async ensure(): Promise<void> {
+  /**
+   * Connects and registers. Only a real use (a tool call, the first start) may start a daemon that is not running: a background
+   * heartbeat must not, or `agentctl stop` would be undone a few seconds later by every session that is still open.
+   */
+  private async ensure(autostart: boolean): Promise<void> {
     if (this.client && this.reg) return
+    if (this.connecting && autostart && !this.connectingAutostart) {
+      // A heartbeat reconnect (which never starts a daemon) is in flight; a real call must not fail because of it.
+      await this.connecting.catch(() => {})
+      if (this.client && this.reg) return
+    }
     if (!this.connecting) {
+      this.connectingAutostart = autostart
       this.connecting = (async () => {
-        const c = await Client.connect()
+        const c = await Client.connect({ autostart })
         c.once('close', () => {
           if (this.client === c) {
             this.client = null
@@ -47,9 +58,10 @@ export class Session {
     await this.connecting
   }
 
-  async call<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  async call<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, opts: { autostart?: boolean } = {}): Promise<T> {
+    const autostart = opts.autostart ?? true
     for (let attempt = 0; ; attempt++) {
-      await this.ensure()
+      await this.ensure(autostart)
       try {
         return (await (this.client as Client).request(method, { agent: (this.reg as Registration).agent, ...params })) as T
       } catch (e) {
@@ -65,18 +77,21 @@ export class Session {
     }
   }
 
-  /** Keep the lease alive without touching the agent's busy/idle status. */
+  /**
+   * Keep the lease alive without touching the agent's busy/idle status. It reconnects and registers again when a daemon is
+   * running, but never starts one.
+   */
   startHeartbeat(): void {
     if (this.timer) return
     const every = Math.max(1000, Math.floor(Number(this.client?.hello.lease_ms ?? 30_000) / 3))
     this.timer = setInterval(() => {
-      this.call('heartbeat').catch(() => {})
+      this.call('heartbeat', {}, { autostart: false }).catch(() => {})
     }, every)
     this.timer.unref()
   }
 
   async start(): Promise<Registration> {
-    await this.ensure()
+    await this.ensure(true)
     return this.reg as Registration
   }
 
