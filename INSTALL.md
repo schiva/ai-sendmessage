@@ -116,15 +116,23 @@ starts the daemon and prints its host name.
 ```
 claude plugin marketplace update agentlink-marketplace
 claude plugin update agentlink@agentlink-marketplace
-agentctl stop
 ```
 
-`agentctl stop` ends the running daemon, which still has the old code; the next command starts the new one. (Idle watchers of
-version 0.2.0 and older restart the daemon they were started from after a `stop`, so end those first: they end when their
-Claude session ends, or kill the `agentctl.mjs wake` process. Newer watchers never start a daemon.) Then start a new
-Claude Code session or run `/reload-plugins`, and check `claude plugin list` for the new version. If `plugin update` says
-"already at the latest version" although the repository has newer commits, those commits did not change the version number:
-uninstall and install the plugin again (step 7, then step 3).
+Then, **in this order**:
+
+1. In every open Claude Code session run `/reload-plugins` (or end the session and start a new one). This replaces the session's
+   hooks and its MCP server, which are still the old version.
+2. Run `agentctl stop`. It ends the daemon, which still has the old code; the next command starts the new one.
+3. Check `agentctl ping` (it prints `agentd <version>`) and `claude plugin list`. If the daemon is not the installed version,
+   `agentctl` prints a warning that names both versions.
+
+Why the order matters: a daemon that is stopped while an old-version component is still running comes back as the old version,
+because that component starts it again. This happens with the MCP server of a session that was not reloaded, and with idle
+watchers (`agentctl wake`) of version 0.2.0 and older (they end when their session ends, or kill the `agentctl.mjs wake`
+process). Watchers of 0.2.1 and later never start a daemon.
+
+If `plugin update` says "already at the latest version" although the repository has newer commits, those commits did not change
+the version number: uninstall and install the plugin again (step 7, then step 3).
 
 ## 7. Uninstall
 

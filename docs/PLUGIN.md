@@ -69,7 +69,7 @@ claude --plugin-dir <저장소 경로>/plugin/agentlink
 ## 5. 알아둘 점
 
 - **hook이 도구 호출마다 실행된다.** `PostToolUse` hook은 호출마다 작은 Node 프로세스를 띄운다(번들 11 KiB). 지연을 수치로 측정하지는 않았다.
-- **업데이트 후 데몬 재시작.** 데몬은 플러그인 캐시의 `dist/agentd.mjs`로 떠 있으므로, 플러그인을 업데이트하면 실행 중인 데몬은 이전 버전이다. `agentctl stop` 후 다시 쓰면 새 버전이 뜬다.
+- **업데이트 후 데몬 재시작.** 데몬은 플러그인 캐시의 `dist/agentd.mjs`로 떠 있으므로, 플러그인을 업데이트하면 실행 중인 데몬은 이전 버전이다. 순서는 (1) 열려 있는 모든 세션에서 `/reload-plugins`, (2) `agentctl stop`, (3) 다시 쓰면 새 버전이 뜬다. 순서가 중요한 이유는, 다시 로드하지 않은 세션의 옛 MCP 서버(와 0.2.0 이하의 유휴 감시기)가 `stop` 직후 옛 데몬을 다시 띄우기 때문이다. 데몬이 설치 버전과 다르면 `agentctl`과 SessionStart 안내가 두 버전을 알려 준다. 자세한 절차는 [INSTALL.md](../INSTALL.md)의 Update 절.
 - **같은 이름의 에이전트.** 세션 이름이 겹치면 `name@host [ref]`로 구분한다.
 - **사용자 설정 방식과 중복하지 않기.** `npm run claude:config`로 만든 수동 설정(hooks와 `.mcp.json`)과 플러그인을 함께 켜면 hook이 두 번 실행된다. 플러그인을 쓸 때는 수동 설정을 빼는 것이 좋다.
 - **다른 AI 도구.** 이 플러그인은 Claude Code 전용이다. 다른 도구는 [SDK.md](SDK.md)의 MCP 어댑터나 SDK로 붙인다.
