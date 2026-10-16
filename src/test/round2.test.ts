@@ -277,3 +277,91 @@ test('the daemon writes the upgrade to agentd.log', async () => {
     await stop(n)
   }
 })
+
+// --- R2: agentctl acl init ---------------------------------------------------------------------------------
+
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { aclStarter, writeAclStarter } from '../agentd/acl-init.ts'
+import { Acl, parseAcl } from '../agentd/acl.ts'
+
+const AGENTCTL = path.join(path.resolve(fileURLToPath(new URL('../..', import.meta.url))), 'src/client/agentctl.ts')
+
+test('the ACL starter is a valid acl.json that allows this PC and its peers and denies everyone else', () => {
+  const starter = aclStarter('pc-a', ['pc-b', 'pc-c', 'pc-b', 'pc-a'])
+  const parsed = parseAcl(starter, 'pc-a')
+  assert.deepEqual(parsed.errors, [], 'the real parser accepts it')
+  assert.equal(parsed.default, 'deny')
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-aclinit-'))
+  try {
+    writeAclStarter(dir, starter, false)
+    const acl = new Acl(dir, 'pc-a')
+    acl.load(true)
+    const allowed = (from: string, to: string) => {
+      const [fn, fh] = from.split('@')
+      const [tn, th] = to.split('@')
+      return acl.check({ name: fn, host: fh }, { name: tn, host: th }).allowed
+    }
+    assert.equal(allowed('alice@pc-a', 'bob@pc-a'), true, 'on this PC')
+    assert.equal(allowed('alice@pc-a', 'bob@pc-b'), true, 'to a peer')
+    assert.equal(allowed('bob@pc-c', 'alice@pc-a'), true, 'from a peer')
+    assert.equal(allowed('bob@pc-b', 'carol@pc-c'), false, 'between two peers (this PC does not route)')
+    assert.equal(allowed('eve@pc-evil', 'alice@pc-a'), false, 'a host that was not listed')
+    assert.equal(allowed('alice@pc-a', 'eve@pc-evil'), false)
+    assert.equal(starter.rules.length, 5, 'this PC, and two rules for each of the two peers (duplicates and itself are dropped)')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an existing acl.json is never replaced without force, and is kept as acl.json.bak when it is', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-aclinit-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'acl.json'), '{"default":"allow","rules":[]}')
+    assert.throws(() => writeAclStarter(dir, aclStarter('pc-a', []), false), { code: 'EEXIST' })
+    assert.equal(fs.readFileSync(path.join(dir, 'acl.json'), 'utf8'), '{"default":"allow","rules":[]}', 'untouched')
+    const done = writeAclStarter(dir, aclStarter('pc-a', ['pc-b']), true)
+    assert.equal(done.backup, path.join(dir, 'acl.json.bak'))
+    assert.equal(fs.readFileSync(done.backup as string, 'utf8'), '{"default":"allow","rules":[]}')
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'acl.json'), 'utf8')).default, 'deny')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('agentctl acl init writes the starter for the hosts of peers.json, reloads it, and refuses to overwrite', async () => {
+  const a = await makeNode('pc-w1')
+  const b = await makeNode('pc-w2')
+  try {
+    await start(a)
+    await start(b)
+    await pair(a, b)
+    const ctl = (...args: string[]) => {
+      const r = spawnSync(process.execPath, ['--no-warnings', AGENTCTL, ...args], { env: { ...process.env, ...a.env, AGENTLINK_HOME: a.home, AGENTLINK_PIPE: a.pipe }, encoding: 'utf8', timeout: 60_000 })
+      return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }
+    }
+    const shown = ctl('acl', 'init', '--print')
+    assert.equal(shown.status, 0, shown.err)
+    assert.equal(JSON.parse(shown.out).default, 'deny')
+    assert.equal(fs.existsSync(path.join(a.home, 'acl.json')), false, '--print writes nothing')
+
+    const init = ctl('acl', 'init')
+    assert.equal(init.status, 0, init.err)
+    assert.match(init.out, /Default: deny/)
+    assert.match(init.out, /pc-w2/)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(a.home, 'acl.json'), 'utf8')).rules.length, 3)
+
+    assert.equal(ctl('acl', 'check', 'alice@pc-w1', 'bob@pc-w2').status, 0, 'a peer is allowed, and the daemon has the new rules')
+    assert.equal(ctl('acl', 'check', 'eve@pc-evil', 'bob@pc-w1').status, 1, 'an unknown host is denied')
+
+    const again = ctl('acl', 'init')
+    assert.equal(again.status, 1)
+    assert.match(again.err, /already exists/)
+    assert.equal(ctl('acl', 'init', '--force').status, 0)
+    assert.equal(fs.existsSync(path.join(a.home, 'acl.json.bak')), true)
+  } finally {
+    await stop(a)
+    await stop(b)
+  }
+})

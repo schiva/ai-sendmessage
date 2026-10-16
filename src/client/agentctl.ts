@@ -3,6 +3,8 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { Client, ApiCallError } from './client.ts'
+import { homeDir } from '../agentd/config.ts'
+import { aclStarter, writeAclStarter } from '../agentd/acl-init.ts'
 import { versionMismatchNote } from '../version.ts'
 import { findSessionPid, sessionAliveCheck, stopWatchers, waitForWake, wakeCommand, wakeOptionsFromEnv } from './wake.ts'
 
@@ -31,6 +33,8 @@ Commands:
   ping               start agentd if needed and print its info
   acl [reload]       show the ACL (who may send to whom); reload re-reads acl.json
   acl check <from> <to>  ask whether name@host may send to name@host
+  acl init [--force] [--print]  write a starting acl.json: default deny, allow this PC and the hosts of peers.json
+                     (--print only shows it; an existing acl.json is replaced only with --force, a backup is kept)
   peers [reload]     show LAN links, the certificate fingerprint of this host, and re-read peers.json
   pair               connect two PCs: prints a one-time code (valid 10 minutes), then waits for the other PC
   pair <code>        on the other PC: join with that code; both PCs then know each other
@@ -66,6 +70,8 @@ const { values, positionals } = parseArgs({
     state: { type: 'string' },
     peek: { type: 'boolean' },
     stop: { type: 'boolean' },
+    force: { type: 'boolean' },
+    print: { type: 'boolean' },
     local: { type: 'boolean' },
     address: { type: 'string' },
     port: { type: 'string' },
@@ -112,6 +118,34 @@ async function main(): Promise<void> {
     return
   }
   if (command === 'acl') {
+    if (rest[0] === 'init') {
+      const known = (await client.request('peers')) as { peers?: Array<{ host: string }> }
+      const starter = aclStarter(client.hello.host, (known.peers ?? []).map(h => h.host))
+      if (values.print) {
+        out(starter, JSON.stringify(starter, null, 2))
+        client.close()
+        return
+      }
+      let written: { file: string; backup: string | null }
+      try {
+        written = writeAclStarter(homeDir(), starter, values.force === true)
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'EEXIST') fail(1, `${(e as Error).message}. Use --print to see the starter, or --force to replace it (the old file is kept as acl.json.bak).`)
+        throw e
+      }
+      await client.request('reload_acl')
+      const hosts = starter.rules.filter(r => r.from.endsWith(`@${client.hello.host}`) && !r.to.endsWith(`@${client.hello.host}`)).map(r => r.to.slice(2))
+      out(
+        { file: written.file, backup: written.backup, hosts },
+        [
+          `Wrote ${written.file}${written.backup ? ` (the old file is now ${written.backup})` : ''} and reloaded it.`,
+          `Default: deny. Allowed: the agents of this PC with each other${hosts.length > 0 ? `, and with the agents of ${hosts.join(', ')} in both directions` : ''}.`,
+          'A PC you pair later is not allowed until you add rules for it (run "agentctl acl init --force" again, or edit acl.json and run "agentctl acl reload").',
+        ].join('\n'),
+      )
+      client.close()
+      return
+    }
     if (rest[0] === 'check') {
       if (!rest[1] || !rest[2]) fail(2, 'usage: agentctl acl check <from name@host> <to name@host>')
       const r = (await client.request('acl_check', { from: rest[1], to: rest[2] })) as { allowed: boolean; reason: string }
