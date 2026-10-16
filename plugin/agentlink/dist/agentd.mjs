@@ -22920,7 +22920,7 @@ var ApiError = class extends Error {
 };
 
 // src/version.ts
-var VERSION = true ? "0.4.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.5.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 // src/agentd/core.ts
 function folderName(path6) {
