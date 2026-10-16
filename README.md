@@ -23,14 +23,14 @@ Claude Code에 이렇게 말하면 저장소만 보고 플러그인을 설치합
 - **P0** (Claude 채널 주입 스파이크): 서버 쪽 테스트는 통과했지만, 이 계정에서는 채널이 조직 정책으로 막혀 세션 주입을 확인하지 못했습니다. 채널은 선택 어댑터로 내렸습니다. 자세한 내용은 [docs/P0.md](docs/P0.md).
 - **P1** (agentd 코어와 `agentctl`): 완료. 같은 PC에서 에이전트 등록, 이름 주소 전송, 영속 inbox, ack, idle 알림, 자동 기동이 동작하고 테스트 20개가 통과합니다.
 - **P2** (MCP 어댑터와 Claude Code hooks 어댑터): 완료. hook과 MCP 서버가 `CLAUDE_CODE_SESSION_ID`로 같은 세션을 식별합니다([docs/P2-SPIKE.md](docs/P2-SPIKE.md)). 테스트 38개, 실제 `claude -p` 세션 종단 테스트(`npm run e2e:claude`, 약 0.15달러), 대화형 두 세션 종단 테스트(`npm run e2e:interactive`, 가상 터미널로 TUI 구동, 약 0.5달러)가 통과했습니다. 대화형 테스트는 양방향 왕복, 쉬는 세션의 지연 전달, `/exit`와 `--resume` 복원까지 확인합니다.
-- **P3** (LAN 피어링): 구현 완료. TLS WebSocket 링크, 인증서 지문 고정과 공유 토큰 인증, `peers.json` 허용 목록, 오프라인 큐(디스크 보존, 재전송, 중복 제거), 원격 에이전트 목록을 갖췄습니다. 한 PC에서 포트를 달리한 데몬 여러 개로 검증했고(테스트 16개, 전체 54개 통과), **실제 두 번째 PC와 방화벽을 거친 검증은 아직 하지 않았습니다**. 절차는 [docs/LAN.md](docs/LAN.md).
+- **P3** (LAN 피어링): 구현 완료. TLS WebSocket 링크, 인증서 지문 고정과 공유 토큰 인증, `peers.json` 허용 목록, 오프라인 큐(디스크 보존, 재전송, 중복 제거), 원격 에이전트 목록을 갖췄습니다. 한 PC에서 포트를 달리한 데몬 여러 개로 검증했고(전체 95개 테스트 통과), 2026-10-16에 실제 두 PC(Windows, 같은 서브넷) 사이에서 링크 연결과 양방향 메시지 왕복을 확인했습니다. 지문·토큰 불일치 거부, 오프라인 큐 재전송, 방화벽 규칙 변형은 실제 PC에서 아직 검증하지 않았습니다. `agentctl pair`로 설정하는 방법은 [docs/LAN.md](docs/LAN.md).
 - **P4** (ACL, 원격 idle 알림, 다른 종류의 에이전트): 구현 완료. `acl.json`으로 누가 누구에게 보낼 수 있는지 정하고([docs/ACL.md](docs/ACL.md)), 다른 PC의 에이전트가 idle이 되면 알림을 받을 수 있으며, Claude가 아닌 에이전트를 SDK나 MCP 어댑터로 붙일 수 있습니다([docs/SDK.md](docs/SDK.md)). 테스트 70개와 실제 Claude 세션 종단 테스트가 통과했습니다.
 - **플러그인**: Claude Code 어댑터를 플러그인으로 포장했습니다(`plugin/agentlink/`). 설치하면 hooks, MCP 서버, `agentctl`이 한 번에 들어옵니다. 번들이라 저장소나 `npm install`이 없어도 동작합니다. 자세한 내용은 [docs/PLUGIN.md](docs/PLUGIN.md). 테스트 79개와 실제 세션 종단 테스트(`npm run e2e:plugin`)가 통과했습니다.
-- **다음**: 실제 두 PC 검증, 외부 AI 도구(Codex CLI, Gemini CLI 등)와의 실제 연동 시험, P5(5대 구성 점검, 운영 문서).
+- **다음**: 실제 두 PC에서 남은 검증(불일치 거부, 오프라인 큐, `agentctl pair`), 외부 AI 도구(Codex CLI, Gemini CLI 등)와의 실제 연동 시험, P5(5대 구성 점검, 운영 문서).
 
 ### 다른 PC와 연결하기
 
-`%LOCALAPPDATA%AgentLinkpeers.json`에 상대 PC의 이름, IP, 공유 토큰, 인증서 지문을 적고 `npm run agentctl -- peers reload`를 실행합니다. 이후 `bob@pc-b`처럼 호스트를 붙여 보내면 됩니다. 자세한 절차와 방화벽 설정은 [docs/LAN.md](docs/LAN.md)를 보세요.
+한 PC에서 `agentctl pair`로 코드를 만들고, 다른 PC에서 `agentctl pair <코드>`를 실행하면 설정이 끝납니다. 이후 `bob@pc-b`처럼 호스트를 붙여 보내면 됩니다. 수동으로 하려면 `%LOCALAPPDATA%\AgentLink\peers.json`에 상대 PC의 이름, IP, 공유 토큰, 인증서 지문을 적고 `agentctl peers reload`를 실행합니다. 자세한 절차와 방화벽 설정은 [docs/LAN.md](docs/LAN.md)를 보세요.
 
 ### Claude Code에 플러그인으로 설치하기 (권장)
 
@@ -76,7 +76,7 @@ npm run agentctl -- stop
 | [docs/PLUGIN.md](docs/PLUGIN.md) | Claude Code 플러그인: 구성, 번들링 이유, 설치, 설정, 주의점 | v0.1, 실제 세션으로 검증 |
 | [docs/ACL.md](docs/ACL.md) | acl.json 규칙, 검사 위치, 파일이 잘못됐을 때의 동작, 한계 | v1.0 |
 | [docs/SDK.md](docs/SDK.md) | 새로운 종류의 에이전트 붙이기(MCP, SDK, CLI, 로컬 API), 보안 규칙 | v1.0 |
-| [docs/LAN.md](docs/LAN.md) | LAN 연결 방식, 두 PC 설정 절차, peers.json, 문제 해결, 신뢰 경계 | v0.1, 단일 PC 다중 데몬으로 검증 |
+| [docs/LAN.md](docs/LAN.md) | LAN 연결 방식, 두 PC 설정 절차, peers.json, 문제 해결, 신뢰 경계 | v0.2, 단일 PC 다중 데몬과 실제 2PC 1회 검증 |
 | [docs/P0.md](docs/P0.md) | P0 채널 스파이크의 구성과 검증 결과 | 종료(선택 어댑터로 보존) |
 | [docs/P2-SPIKE.md](docs/P2-SPIKE.md) | Claude 세션 식별 스파이크(hook과 MCP 서버의 환경, 결론) | 완료 |
 
