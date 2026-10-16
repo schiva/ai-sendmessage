@@ -2287,7 +2287,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net2 = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes3, createHash } = __require("crypto");
+    var { randomBytes: randomBytes4, createHash } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -2838,7 +2838,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes3(16).toString("base64");
+      const key = randomBytes4(16).toString("base64");
       const request = isSecure ? https2.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -22830,7 +22830,7 @@ var require_selfsigned = __commonJS({
 // src/agentd/main.ts
 import fs4 from "node:fs";
 import path5 from "node:path";
-import { randomBytes as randomBytes2 } from "node:crypto";
+import { randomBytes as randomBytes3 } from "node:crypto";
 
 // src/agentd/config.ts
 import os from "node:os";
@@ -23387,7 +23387,7 @@ var Core = class {
 
 // src/agentd/peers.ts
 import https from "node:https";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 
 // node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -23398,6 +23398,10 @@ var import_sender = __toESM(require_sender(), 1);
 var import_subprotocol = __toESM(require_subprotocol(), 1);
 var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
+
+// src/agentd/peers-config.ts
+import fs2 from "node:fs";
+import path3 from "node:path";
 
 // src/agentd/tls.ts
 var import_selfsigned = __toESM(require_selfsigned(), 1);
@@ -23447,6 +23451,162 @@ async function ensureTls(home2, host) {
   throw new Error(`cannot read the TLS identity in ${dir}`);
 }
 
+// src/agentd/peers-config.ts
+var HOST_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+var DEFAULT_PORT = 7420;
+var MIN_TOKEN_LENGTH = 16;
+function isPort(n) {
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 65535;
+}
+function parsePeersConfig(raw, selfHost) {
+  const out = { listen: null, peers: [], errors: [] };
+  if (typeof raw !== "object" || raw === null) {
+    out.errors.push("peers.json must contain a JSON object");
+    return out;
+  }
+  const obj = raw;
+  const peersRaw = Array.isArray(obj.peers) ? obj.peers : [];
+  if (obj.peers !== void 0 && !Array.isArray(obj.peers)) out.errors.push('"peers" must be an array');
+  const seen = /* @__PURE__ */ new Set();
+  peersRaw.forEach((p, i) => {
+    const where = `peers[${i}]`;
+    if (typeof p !== "object" || p === null) return void out.errors.push(`${where}: must be an object`);
+    const e = p;
+    const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
+    if (!HOST_RE.test(name)) return void out.errors.push(`${where}: "name" must be the peer's host name (letters, digits, ".", "-", "_")`);
+    if (name === selfHost) return void out.errors.push(`${where}: "${name}" is this host itself`);
+    if (seen.has(name)) return void out.errors.push(`${where}: duplicate peer "${name}"`);
+    const token2 = typeof e.token === "string" ? e.token : "";
+    if (token2.length < MIN_TOKEN_LENGTH) return void out.errors.push(`${where} (${name}): "token" must be a shared secret of at least ${MIN_TOKEN_LENGTH} characters`);
+    const dial = e.dial !== false;
+    const fingerprint = typeof e.fingerprint === "string" ? normalizeFingerprint(e.fingerprint) : "";
+    let address = "";
+    let port = DEFAULT_PORT;
+    if (dial) {
+      if (typeof e.address !== "string" || e.address.trim() === "") return void out.errors.push(`${where} (${name}): "address" is required unless "dial" is false`);
+      address = e.address.trim();
+      if (fingerprint.length !== 64) return void out.errors.push(`${where} (${name}): "fingerprint" (SHA-256 of the peer certificate) is required unless "dial" is false`);
+      if (e.port !== void 0) {
+        if (!isPort(e.port)) return void out.errors.push(`${where} (${name}): "port" must be 1-65535`);
+        port = e.port;
+      }
+    }
+    seen.add(name);
+    out.peers.push({ name, address, port, token: token2, fingerprint, dial });
+  });
+  if (out.peers.length > 0) {
+    const l = obj.listen ?? {};
+    const host = typeof l.host === "string" && l.host.trim() ? l.host.trim() : "127.0.0.1";
+    const port = l.port === void 0 ? DEFAULT_PORT : l.port;
+    if (!isPort(port)) out.errors.push("listen.port must be 1-65535");
+    else out.listen = { host, port };
+  }
+  return out;
+}
+function peersFile(home2) {
+  return path3.join(home2, "peers.json");
+}
+var LOOPBACK_RE = /^(127\.|localhost$|::1$)/i;
+function upsertPeerFile(home2, peer, listen) {
+  const file = peersFile(home2);
+  let raw = {};
+  let text = null;
+  try {
+    text = fs2.readFileSync(file, "utf8");
+  } catch (e) {
+    if (e.code !== "ENOENT") throw new Error(`cannot read peers.json: ${String(e)}`);
+  }
+  if (text !== null) {
+    try {
+      const parsed = JSON.parse(text.replace(/^﻿/, ""));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+      raw = parsed;
+    } catch {
+      throw new Error(`peers.json exists but is not valid JSON; fix or delete ${file} and pair again`);
+    }
+  }
+  const peers = Array.isArray(raw.peers) ? [...raw.peers] : [];
+  const at = peers.findIndex((p) => typeof p === "object" && p !== null && typeof p.name === "string" && p.name.toLowerCase() === peer.name);
+  if (at >= 0) peers[at] = peer;
+  else peers.push(peer);
+  raw.peers = peers;
+  if (listen) {
+    const l = raw.listen;
+    const usable = l && typeof l.host === "string" && l.host.trim() !== "" && !LOOPBACK_RE.test(l.host.trim());
+    if (!usable) raw.listen = { host: listen.host, port: listen.port };
+  }
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs2.writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n", { mode: 384 });
+  fs2.renameSync(tmp, file);
+}
+function loadPeersConfig(home2, selfHost) {
+  let text;
+  try {
+    text = fs2.readFileSync(peersFile(home2), "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return { listen: null, peers: [], errors: [] };
+    return { listen: null, peers: [], errors: [`cannot read peers.json: ${String(e)}`] };
+  }
+  try {
+    return parsePeersConfig(JSON.parse(text.replace(/^﻿/, "")), selfHost);
+  } catch (e) {
+    return { listen: null, peers: [], errors: [`peers.json is not valid JSON: ${String(e instanceof Error ? e.message : e)}`] };
+  }
+}
+
+// src/agentd/pair.ts
+import os2 from "node:os";
+import { createHmac, timingSafeEqual } from "node:crypto";
+var CODE_PREFIX = "AL1-";
+var DEFAULT_PAIR_TTL_S = 600;
+var MAX_PAIR_FAILURES = 5;
+function encodeCode(c) {
+  return CODE_PREFIX + Buffer.from(`${c.address}
+${c.port}
+${c.fingerprint}
+${c.secret}`, "utf8").toString("base64url");
+}
+function decodeCode(text) {
+  const t = text.trim();
+  if (!t.startsWith(CODE_PREFIX)) return `a pairing code starts with "${CODE_PREFIX}"`;
+  let parts;
+  try {
+    parts = Buffer.from(t.slice(CODE_PREFIX.length), "base64url").toString("utf8").split("\n");
+  } catch {
+    return "the pairing code is damaged";
+  }
+  if (parts.length !== 4) return "the pairing code is damaged (was it copied completely?)";
+  const [address, portText, fingerprint, secret] = parts;
+  const port = Number(portText);
+  if (!address || address.length > 253 || /\s/.test(address)) return "the pairing code is damaged";
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return "the pairing code is damaged";
+  if (!/^[0-9a-f]{64}$/.test(fingerprint)) return "the pairing code is damaged";
+  if (!/^[0-9a-f]{32}$/.test(secret)) return "the pairing code is damaged";
+  return { address, port, fingerprint: normalizeFingerprint(fingerprint), secret };
+}
+function pairProof(secret, joinerHost) {
+  return createHmac("sha256", secret).update(`agentlink-pair-v1|${joinerHost}`).digest("hex");
+}
+function linkToken(secret) {
+  return createHmac("sha256", secret).update("agentlink-link-v1").digest("hex");
+}
+function proofMatches(given, expected) {
+  if (typeof given !== "string") return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+function lanAddresses() {
+  const out = [];
+  for (const addrs of Object.values(os2.networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family !== "IPv4" || a.internal || a.address.startsWith("169.254.")) continue;
+      out.push(a.address);
+    }
+  }
+  return out;
+}
+
 // src/agentd/peers.ts
 var MAX_FRAME = 512 * 1024;
 var HANDSHAKE_MS = 5e3;
@@ -23464,11 +23624,12 @@ var KNOWN_CODES = /* @__PURE__ */ new Set([
   "LOOP_DETECTED",
   "INTERNAL"
 ]);
+var isWildcard = (h) => h === "0.0.0.0" || h === "::";
 function tokenMatches(given, expected) {
   if (typeof given !== "string") return false;
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return a.length === b.length && timingSafeEqual2(a, b);
 }
 function parseFrame(data, isBinary) {
   if (isBinary) return null;
@@ -23505,6 +23666,7 @@ var PeerManager = class {
   core;
   store;
   cfg;
+  home;
   tls;
   selfHost;
   log;
@@ -23517,10 +23679,12 @@ var PeerManager = class {
   listening = null;
   listenError = null;
   directoryTimer = null;
+  pairing = null;
   constructor(opts) {
     this.core = opts.core;
     this.store = opts.store;
     this.cfg = opts.cfg;
+    this.home = opts.home;
     this.tls = opts.tls;
     this.selfHost = opts.selfHost;
     this.log = opts.log;
@@ -23621,6 +23785,7 @@ var PeerManager = class {
     for (const e of next.errors) this.log(`peers.json: ${e}`);
   }
   async stop() {
+    if (this.pairing) clearTimeout(this.pairing.timer);
     if (this.directoryTimer) clearInterval(this.directoryTimer);
     this.directoryTimer = null;
     for (const name of [...this.dialers.keys()]) this.stopDialer(name);
@@ -23634,6 +23799,147 @@ var PeerManager = class {
       this.store.deleteOutbox(row.id);
       this.core.deliverNotice(row.sender_agent, `Message to ${row.to_display} could not be delivered within ${Math.round(this.cfg.outboxTtlMs / 36e5)}h and was dropped.`);
     }
+  }
+  // --- pairing (see pair.ts) ---------------------------------------------------------------------------
+  /** Host side: opens the LAN port for one joining PC and returns the code to type there. */
+  async startPairing(opts) {
+    const l = this.listening;
+    const port = opts.port ?? l?.port ?? DEFAULT_PORT;
+    let address = opts.address;
+    if (!address) address = l && !isWildcard(l.host) && l.host !== "127.0.0.1" ? l.host : lanAddresses()[0];
+    if (!address) throw new ApiError("BAD_REQUEST", "no LAN address of this PC found; pass --address <IP of this PC>");
+    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, 10), 3600);
+    if (this.pairing) {
+      clearTimeout(this.pairing.timer);
+      this.pairing.state = "cancelled";
+      this.pairing.secret = "";
+    }
+    const reachable = this.listening && this.listening.port === port && (this.listening.host === address || isWildcard(this.listening.host));
+    if (!reachable) {
+      await this.stopListener();
+      await this.startListener({ host: address, port });
+      if (!this.listening) {
+        const why = this.listenError ?? "unknown error";
+        await this.restoreListener();
+        throw new ApiError("INTERNAL", `cannot listen on ${address}:${port}: ${why}`);
+      }
+    }
+    const secret = randomBytes2(16).toString("hex");
+    const timer = setTimeout(() => this.endPairing("expired"), ttlS * 1e3);
+    timer.unref();
+    this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1e3, failures: 0, state: "waiting", host: null, detail: null, timer };
+    this.log(`pairing opened on ${address}:${port} for ${ttlS}s`);
+    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost };
+  }
+  pairStatus() {
+    const p = this.pairing;
+    if (!p) return { state: "none" };
+    return { state: p.state, host: p.host, detail: p.detail, expires_s: Math.max(0, Math.round((p.expiresAt - Date.now()) / 1e3)) };
+  }
+  cancelPairing() {
+    if (this.pairing?.state === "waiting") this.endPairing("cancelled");
+    return this.pairStatus();
+  }
+  endPairing(state, host = null, detail = null) {
+    const p = this.pairing;
+    if (!p || p.state !== "waiting") return;
+    clearTimeout(p.timer);
+    p.state = state;
+    p.host = host;
+    p.detail = detail;
+    p.secret = "";
+    this.log(`pairing ${state}${host ? ` with ${host}` : ""}${detail ? `: ${detail}` : ""}`);
+    if (state !== "paired") void this.restoreListener();
+  }
+  async restoreListener() {
+    try {
+      await this.apply(loadPeersConfig(this.home, this.selfHost));
+    } catch (e) {
+      this.log(`could not restore the listener: ${String(e)}`);
+    }
+  }
+  /** Host side: a joining PC sent a `pair` frame. */
+  onPair(ws, f) {
+    const refuse = (code) => {
+      try {
+        ws.send(JSON.stringify({ t: "error", code }));
+      } catch {
+      }
+      ws.close(1008, "refused");
+    };
+    const p = this.pairing;
+    if (!p || p.state !== "waiting" || Date.now() > p.expiresAt) return refuse("UNAUTHORIZED");
+    const host = typeof f.host === "string" ? f.host.toLowerCase() : "";
+    if (f.v !== 1 || !HOST_RE.test(host) || host === this.selfHost) return refuse("BAD_REQUEST");
+    if (!proofMatches(f.proof, pairProof(p.secret, host))) {
+      p.failures++;
+      this.log(`pairing: wrong proof from "${host.slice(0, 64)}" (${p.failures}/${MAX_PAIR_FAILURES})`);
+      if (p.failures >= MAX_PAIR_FAILURES) this.endPairing("failed", null, "too many wrong attempts");
+      return refuse("UNAUTHORIZED");
+    }
+    try {
+      upsertPeerFile(this.home, { name: host, token: linkToken(p.secret), dial: false }, { host: p.address, port: p.port });
+    } catch (e) {
+      this.endPairing("failed", null, e instanceof Error ? e.message : String(e));
+      return refuse("INTERNAL");
+    }
+    this.endPairing("paired", host);
+    ws.send(JSON.stringify({ t: "paired", v: 1, host: this.selfHost }), () => {
+      ws.close(1e3, "paired");
+      void this.restoreListener();
+    });
+  }
+  /** Joining side: connects to the host that made `codeText`, proves the code and records the host in peers.json. */
+  joinPairing(codeText) {
+    const c = decodeCode(codeText);
+    if (typeof c === "string") throw new ApiError("BAD_REQUEST", c);
+    if (c.fingerprint === this.tls.fingerprint) throw new ApiError("BAD_REQUEST", 'this code was made by this PC; run "agentctl pair <code>" on the other PC');
+    return new Promise((resolve, reject) => {
+      const ws = new import_websocket.default(`wss://${c.address}:${c.port}`, { rejectUnauthorized: false, handshakeTimeout: HANDSHAKE_MS, maxPayload: MAX_FRAME, minVersion: "TLSv1.2" });
+      let settled = false;
+      const finish = (err, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (err) {
+          try {
+            ws.terminate();
+          } catch {
+          }
+          reject(err);
+        } else {
+          ws.close(1e3, "paired");
+          resolve(value);
+        }
+      };
+      const timer = setTimeout(() => finish(new ApiError("INTERNAL", `no answer from ${c.address}:${c.port} within 15 s`)), 15e3);
+      ws.on("open", () => {
+        const sock = ws._socket;
+        const got = normalizeFingerprint(sock?.getPeerCertificate?.().fingerprint256 ?? "");
+        if (got !== c.fingerprint) {
+          return finish(new ApiError("FORBIDDEN", `the certificate at ${c.address}:${c.port} does not match the code (wrong code, or another PC answers on that address)`));
+        }
+        ws.send(JSON.stringify({ t: "pair", v: 1, host: this.selfHost, proof: pairProof(c.secret, this.selfHost) }));
+      });
+      ws.on("message", (data, isBinary) => {
+        const f = parseFrame(data, isBinary);
+        if (!f) return finish(new ApiError("INTERNAL", "unexpected reply from the other PC"));
+        if (f.t === "error") return finish(new ApiError("FORBIDDEN", `the other PC refused the code (${String(f.code)}): it may have expired, been used already, or be mistyped`));
+        const peerHost = f.t === "paired" && typeof f.host === "string" ? f.host.toLowerCase() : "";
+        if (!HOST_RE.test(peerHost) || peerHost === this.selfHost) return finish(new ApiError("INTERNAL", "unexpected reply from the other PC"));
+        try {
+          upsertPeerFile(this.home, { name: peerHost, address: c.address, port: c.port, token: linkToken(c.secret), fingerprint: displayFingerprint(c.fingerprint), dial: true });
+        } catch (e) {
+          return finish(new ApiError("INTERNAL", e instanceof Error ? e.message : String(e)));
+        }
+        this.apply(loadPeersConfig(this.home, this.selfHost)).then(
+          () => finish(null, { host: peerHost, address: c.address, port: c.port }),
+          (e) => finish(new ApiError("INTERNAL", String(e)))
+        );
+      });
+      ws.on("error", (e) => finish(new ApiError("INTERNAL", `cannot reach ${c.address}:${c.port}: ${e.message}. Is TCP ${c.port} open in the firewall of that PC?`)));
+      ws.on("close", () => finish(new ApiError("INTERNAL", "the other PC closed the connection before pairing finished")));
+    });
   }
   // --- listener (inbound links) ------------------------------------------------------------
   startListener(l) {
@@ -23752,6 +24058,7 @@ var PeerManager = class {
       }
       if (host === null) {
         if (initiator === "peer") {
+          if (f.t === "pair") return this.onPair(ws, f);
           const peer = f.t === "hello" && f.v === 1 && typeof f.host === "string" ? this.config.peers.find((p) => p.name === f.host) : void 0;
           if (!peer || !tokenMatches(f.token, peer.token)) {
             this.log(`rejected inbound peer "${String(f.host).slice(0, 64)}": ${peer ? "bad token" : "not in peers.json"}`);
@@ -23903,87 +24210,15 @@ var PeerManager = class {
   }
 };
 
-// src/agentd/peers-config.ts
-import fs2 from "node:fs";
-import path3 from "node:path";
-var HOST_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
-var DEFAULT_PORT = 7420;
-var MIN_TOKEN_LENGTH = 16;
-function isPort(n) {
-  return typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 65535;
-}
-function parsePeersConfig(raw, selfHost) {
-  const out = { listen: null, peers: [], errors: [] };
-  if (typeof raw !== "object" || raw === null) {
-    out.errors.push("peers.json must contain a JSON object");
-    return out;
-  }
-  const obj = raw;
-  const peersRaw = Array.isArray(obj.peers) ? obj.peers : [];
-  if (obj.peers !== void 0 && !Array.isArray(obj.peers)) out.errors.push('"peers" must be an array');
-  const seen = /* @__PURE__ */ new Set();
-  peersRaw.forEach((p, i) => {
-    const where = `peers[${i}]`;
-    if (typeof p !== "object" || p === null) return void out.errors.push(`${where}: must be an object`);
-    const e = p;
-    const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
-    if (!HOST_RE.test(name)) return void out.errors.push(`${where}: "name" must be the peer's host name (letters, digits, ".", "-", "_")`);
-    if (name === selfHost) return void out.errors.push(`${where}: "${name}" is this host itself`);
-    if (seen.has(name)) return void out.errors.push(`${where}: duplicate peer "${name}"`);
-    const token2 = typeof e.token === "string" ? e.token : "";
-    if (token2.length < MIN_TOKEN_LENGTH) return void out.errors.push(`${where} (${name}): "token" must be a shared secret of at least ${MIN_TOKEN_LENGTH} characters`);
-    const dial = e.dial !== false;
-    const fingerprint = typeof e.fingerprint === "string" ? normalizeFingerprint(e.fingerprint) : "";
-    let address = "";
-    let port = DEFAULT_PORT;
-    if (dial) {
-      if (typeof e.address !== "string" || e.address.trim() === "") return void out.errors.push(`${where} (${name}): "address" is required unless "dial" is false`);
-      address = e.address.trim();
-      if (fingerprint.length !== 64) return void out.errors.push(`${where} (${name}): "fingerprint" (SHA-256 of the peer certificate) is required unless "dial" is false`);
-      if (e.port !== void 0) {
-        if (!isPort(e.port)) return void out.errors.push(`${where} (${name}): "port" must be 1-65535`);
-        port = e.port;
-      }
-    }
-    seen.add(name);
-    out.peers.push({ name, address, port, token: token2, fingerprint, dial });
-  });
-  if (out.peers.length > 0) {
-    const l = obj.listen ?? {};
-    const host = typeof l.host === "string" && l.host.trim() ? l.host.trim() : "127.0.0.1";
-    const port = l.port === void 0 ? DEFAULT_PORT : l.port;
-    if (!isPort(port)) out.errors.push("listen.port must be 1-65535");
-    else out.listen = { host, port };
-  }
-  return out;
-}
-function peersFile(home2) {
-  return path3.join(home2, "peers.json");
-}
-function loadPeersConfig(home2, selfHost) {
-  let text;
-  try {
-    text = fs2.readFileSync(peersFile(home2), "utf8");
-  } catch (e) {
-    if (e.code === "ENOENT") return { listen: null, peers: [], errors: [] };
-    return { listen: null, peers: [], errors: [`cannot read peers.json: ${String(e)}`] };
-  }
-  try {
-    return parsePeersConfig(JSON.parse(text.replace(/^﻿/, "")), selfHost);
-  } catch (e) {
-    return { listen: null, peers: [], errors: [`peers.json is not valid JSON: ${String(e instanceof Error ? e.message : e)}`] };
-  }
-}
-
 // src/agentd/server.ts
 import net from "node:net";
-import { timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { EventEmitter as EventEmitter2 } from "node:events";
 function tokenMatches2(given, expected) {
   if (typeof given !== "string") return false;
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual2(a, b);
+  return a.length === b.length && timingSafeEqual3(a, b);
 }
 var Server = class extends EventEmitter2 {
   core;
@@ -24134,6 +24369,21 @@ var Server = class extends EventEmitter2 {
         return this.admin ? await this.admin.peersStatus() : { peers: [] };
       case "reload_peers":
         return this.admin ? await this.admin.reloadPeers() : {};
+      case "pair_start": {
+        if (!this.admin) return {};
+        const port = p.port === void 0 ? void 0 : Number(p.port);
+        if (port !== void 0 && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new ApiError("BAD_REQUEST", '"port" must be 1-65535');
+        const ttlS = p.ttl_s === void 0 ? void 0 : Number(p.ttl_s);
+        if (ttlS !== void 0 && !Number.isFinite(ttlS)) throw new ApiError("BAD_REQUEST", '"ttl_s" must be a number');
+        return await this.admin.pairStart({ address: typeof p.address === "string" && p.address.trim() ? p.address.trim() : void 0, port, ttlS });
+      }
+      case "pair_status":
+        return this.admin ? await this.admin.pairStatus() : {};
+      case "pair_cancel":
+        return this.admin ? await this.admin.pairCancel() : {};
+      case "pair_join":
+        if (typeof p.code !== "string" || p.code.trim() === "") throw new ApiError("BAD_REQUEST", '"code" is required');
+        return this.admin ? await this.admin.pairJoin(p.code) : {};
       case "shutdown":
         return {};
       default:
@@ -24452,7 +24702,7 @@ function log(line) {
 }
 function ensureToken(file) {
   try {
-    const t = randomBytes2(32).toString("hex");
+    const t = randomBytes3(32).toString("hex");
     fs4.writeFileSync(file, t, { flag: "wx" });
     return t;
   } catch (e) {
@@ -24501,6 +24751,19 @@ var server = await (async () => {
       if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
       await peers.apply(loadPeersConfig(home, host));
       return peers.status();
+    },
+    pairStart: async (o) => {
+      await waitForLan();
+      if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
+      return peers.startPairing(o);
+    },
+    pairStatus: async () => peers ? peers.pairStatus() : { state: "none" },
+    pairCancel: async () => peers ? peers.cancelPairing() : { state: "none" },
+    pairJoin: async (code) => {
+      await waitForLan();
+      if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
+      const r = await peers.joinPairing(code);
+      return { ...r, self: host };
     }
   });
   try {
@@ -24535,7 +24798,7 @@ var server = await (async () => {
     }, 50);
   });
   const tls = await ensureTls(home, host);
-  peers = new PeerManager({ core, store, cfg, tls, selfHost: host, log });
+  peers = new PeerManager({ core, store, cfg, home, tls, selfHost: host, log });
   core.setRemote(peers);
   await peers.apply(loadPeersConfig(home, host));
   markReady();

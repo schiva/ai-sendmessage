@@ -78,6 +78,19 @@ const server = await (async () => {
       await peers.apply(loadPeersConfig(home, host))
       return peers.status()
     },
+    pairStart: async o => {
+      await waitForLan()
+      if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')
+      return peers.startPairing(o)
+    },
+    pairStatus: async () => (peers ? peers.pairStatus() : { state: 'none' }),
+    pairCancel: async () => (peers ? peers.cancelPairing() : { state: 'none' }),
+    pairJoin: async code => {
+      await waitForLan()
+      if (!peers) throw new ApiError('INTERNAL', 'the LAN layer did not start; see agentd.log')
+      const r = await peers.joinPairing(code)
+      return { ...r, self: host }
+    },
   })
   try {
     await srv.listen(pipePath())
@@ -116,7 +129,7 @@ const server = await (async () => {
     }, 50)
   })
   const tls = await ensureTls(home, host)
-  peers = new PeerManager({ core, store, cfg, tls, selfHost: host, log })
+  peers = new PeerManager({ core, store, cfg, home, tls, selfHost: host, log })
   core.setRemote(peers)
   // LAN peering is optional: it only starts when peers.json lists at least one peer.
   await peers.apply(loadPeersConfig(home, host))

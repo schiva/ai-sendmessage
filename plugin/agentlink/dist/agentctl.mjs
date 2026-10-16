@@ -1,6 +1,7 @@
 import { createRequire as __agentlinkCreateRequire } from 'node:module'; const require = __agentlinkCreateRequire(import.meta.url);
 
 // src/client/agentctl.ts
+import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
 // src/client/client.ts
@@ -174,7 +175,7 @@ var USAGE = `agentctl - AgentLink command line client
 
 Usage: agentctl [options] <command> [args]
 
-Identity (for every command except ping, stop, peers and acl):
+Identity (for every command except ping, stop, peers, pair and acl):
   --as <name>        act as the agent <name> (registered under the key "cli:<name>")
   --agent <id>       act as an already registered agent id (or set AGENTLINK_AGENT)
 
@@ -192,6 +193,8 @@ Commands:
   acl [reload]       show the ACL (who may send to whom); reload re-reads acl.json
   acl check <from> <to>  ask whether name@host may send to name@host
   peers [reload]     show LAN links, the certificate fingerprint of this host, and re-read peers.json
+  pair               connect two PCs: prints a one-time code (valid 10 minutes), then waits for the other PC
+  pair <code>        on the other PC: join with that code; both PCs then know each other
   stop               shut agentd down
 
 Options:
@@ -204,6 +207,9 @@ Options:
   --wait <ms>        for inbox: wait up to <ms> for a new message
   --state <s>        inbox state filter: new | delivered | acked | any
   --peek             inbox without changing message state
+  --address <ip>     for pair: the IP of this PC that the other PC should use (default: detected)
+  --port <n>         for pair: LAN port (default 7420)
+  --ttl <seconds>    for pair: how long the code is valid (default 600)
 `;
 var { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -220,6 +226,9 @@ var { values, positionals } = parseArgs({
     state: { type: "string" },
     peek: { type: "boolean" },
     local: { type: "boolean" },
+    address: { type: "string" },
+    port: { type: "string" },
+    ttl: { type: "string" },
     help: { type: "boolean", short: "h" }
   }
 });
@@ -272,6 +281,65 @@ async function main() {
     out(r, lines.join("\n"));
     client.close();
     return;
+  }
+  if (command === "pair") {
+    const sleep2 = (ms) => new Promise((r2) => setTimeout(r2, ms));
+    const linkUp = async (host) => {
+      const s = await client.request("peers");
+      return s.peers?.find((p) => p.host === host)?.link === "up";
+    };
+    if (rest[0]) {
+      const r2 = await client.request("pair_join", { code: rest.join("") });
+      console.log(`Paired with ${r2.host} (${r2.address}:${r2.port}). Waiting for the link...`);
+      let up = false;
+      for (let i = 0; i < 20 && !up; i++) {
+        up = await linkUp(r2.host);
+        if (!up) await sleep2(1e3);
+      }
+      console.log(up ? `Connected to ${r2.host}. Agents there are now visible as name@${r2.host}.` : `Paired, but the link to ${r2.host} is not up yet. Check "agentctl peers" in a moment.`);
+      client.close();
+      return;
+    }
+    const r = await client.request("pair_start", {
+      address: values.address,
+      port: values.port ? Number(values.port) : void 0,
+      ttl_s: values.ttl ? Number(values.ttl) : void 0
+    });
+    console.log(`On the other PC run:
+
+  agentctl pair ${r.code}
+`);
+    console.log(`This PC is "${r.host}" at ${r.address}:${r.port}. The code works once and expires in ${Math.round(r.expires_s / 60)} min.`);
+    if (process.platform === "win32") {
+      const fw = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-NetFirewallRule -DisplayName 'AgentLink*' -ErrorAction SilentlyContinue | Measure-Object).Count"], { encoding: "utf8", timeout: 1e4 });
+      if (fw.status === 0 && fw.stdout.trim() === "0") {
+        console.log(`
+No firewall rule for AgentLink found. If the other PC cannot connect, run this once in an administrator PowerShell:
+
+  New-NetFirewallRule -DisplayName "AgentLink" -Direction Inbound -Protocol TCP -LocalPort ${r.port} -RemoteAddress LocalSubnet -Action Allow`);
+      }
+    }
+    console.log("\nWaiting for the other PC (Ctrl+C to cancel)...");
+    process.on("SIGINT", () => {
+      client.request("pair_cancel").catch(() => {
+      }).finally(() => process.exit(130));
+    });
+    for (; ; ) {
+      await sleep2(1e3);
+      const s = await client.request("pair_status");
+      if (s.state === "waiting") continue;
+      if (s.state === "paired" && s.host) {
+        let up = false;
+        for (let i = 0; i < 20 && !up; i++) {
+          up = await linkUp(s.host);
+          if (!up) await sleep2(1e3);
+        }
+        console.log(up ? `Paired with ${s.host} and connected.` : `Paired with ${s.host}. The link comes up as soon as that PC connects (see "agentctl peers").`);
+        client.close();
+        return;
+      }
+      fail(1, `Pairing ${s.state}${s.detail ? `: ${s.detail}` : ""}. Run "agentctl pair" again.`);
+    }
   }
   if (command === "stop") {
     await client.request("shutdown");

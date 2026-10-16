@@ -79,6 +79,45 @@ export function peersFile(home: string): string {
   return path.join(home, 'peers.json')
 }
 
+const LOOPBACK_RE = /^(127\.|localhost$|::1$)/i
+
+/**
+ * Adds or replaces one peer in peers.json and keeps everything else (other peers, unknown fields) as it is.
+ * `listen` is only written when the file has no usable listen address yet, so a choice the user made stays.
+ */
+export function upsertPeerFile(home: string, peer: Record<string, unknown> & { name: string }, listen?: { host: string; port: number }): void {
+  const file = peersFile(home)
+  let raw: Record<string, unknown> = {}
+  let text: string | null = null
+  try {
+    text = fs.readFileSync(file, 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`cannot read peers.json: ${String(e)}`)
+  }
+  if (text !== null) {
+    try {
+      const parsed = JSON.parse(text.replace(/^﻿/, ''))
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object')
+      raw = parsed as Record<string, unknown>
+    } catch {
+      throw new Error(`peers.json exists but is not valid JSON; fix or delete ${file} and pair again`)
+    }
+  }
+  const peers = Array.isArray(raw.peers) ? [...raw.peers] : []
+  const at = peers.findIndex(p => typeof p === 'object' && p !== null && typeof (p as { name?: unknown }).name === 'string' && (p as { name: string }).name.toLowerCase() === peer.name)
+  if (at >= 0) peers[at] = peer
+  else peers.push(peer)
+  raw.peers = peers
+  if (listen) {
+    const l = raw.listen as { host?: unknown } | undefined
+    const usable = l && typeof l.host === 'string' && l.host.trim() !== '' && !LOOPBACK_RE.test(l.host.trim())
+    if (!usable) raw.listen = { host: listen.host, port: listen.port }
+  }
+  const tmp = `${file}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 })
+  fs.renameSync(tmp, file)
+}
+
 export function loadPeersConfig(home: string, selfHost: string): PeersConfig {
   let text: string
   try {

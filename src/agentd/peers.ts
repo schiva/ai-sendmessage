@@ -3,14 +3,16 @@
 //   - the dialed host authenticates the caller with a shared token and the peers.json allow list (S-01, S-02)
 //   - messages are stored first (outbox) and sent at least once; the receiver deduplicates by id (F-06, F-07)
 import https from 'node:https'
-import { timingSafeEqual } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { RawData } from 'ws'
 import type { Config } from './config.ts'
 import type { Core } from './core.ts'
 import { ApiError, NAME_RE, REF_RE } from './protocol.ts'
 import type { ErrorCode } from './protocol.ts'
+import { DEFAULT_PORT, HOST_RE, loadPeersConfig, upsertPeerFile } from './peers-config.ts'
 import type { PeerEntry, PeersConfig } from './peers-config.ts'
+import { DEFAULT_PAIR_TTL_S, MAX_PAIR_FAILURES, decodeCode, encodeCode, lanAddresses, linkToken, pairProof, proofMatches } from './pair.ts'
 import type { HostStatus, OutFrame, RemoteAgent, RemoteGateway } from './remote.ts'
 import type { Store } from './store.ts'
 import { displayFingerprint, normalizeFingerprint } from './tls.ts'
@@ -59,6 +61,22 @@ interface Pending {
   reject: (e: Error) => void
 }
 
+type PairOutcome = 'waiting' | 'paired' | 'expired' | 'cancelled' | 'failed'
+
+interface PairState {
+  secret: string
+  address: string
+  port: number
+  expiresAt: number
+  failures: number
+  state: PairOutcome
+  host: string | null
+  detail: string | null
+  timer: NodeJS.Timeout
+}
+
+const isWildcard = (h: string) => h === '0.0.0.0' || h === '::'
+
 function tokenMatches(given: unknown, expected: string): boolean {
   if (typeof given !== 'string') return false
   const a = Buffer.from(given)
@@ -103,6 +121,7 @@ export class PeerManager implements RemoteGateway {
   private core: Core
   private store: Store
   private cfg: Config
+  private home: string
   private tls: TlsMaterial
   private selfHost: string
   private log: (line: string) => void
@@ -115,11 +134,13 @@ export class PeerManager implements RemoteGateway {
   private listening: { host: string; port: number } | null = null
   private listenError: string | null = null
   private directoryTimer: NodeJS.Timeout | null = null
+  private pairing: PairState | null = null
 
-  constructor(opts: { core: Core; store: Store; cfg: Config; tls: TlsMaterial; selfHost: string; log: (line: string) => void }) {
+  constructor(opts: { core: Core; store: Store; cfg: Config; home: string; tls: TlsMaterial; selfHost: string; log: (line: string) => void }) {
     this.core = opts.core
     this.store = opts.store
     this.cfg = opts.cfg
+    this.home = opts.home
     this.tls = opts.tls
     this.selfHost = opts.selfHost
     this.log = opts.log
@@ -234,6 +255,7 @@ export class PeerManager implements RemoteGateway {
   }
 
   async stop(): Promise<void> {
+    if (this.pairing) clearTimeout(this.pairing.timer)
     if (this.directoryTimer) clearInterval(this.directoryTimer)
     this.directoryTimer = null
     for (const name of [...this.dialers.keys()]) this.stopDialer(name)
@@ -248,6 +270,159 @@ export class PeerManager implements RemoteGateway {
       this.store.deleteOutbox(row.id)
       this.core.deliverNotice(row.sender_agent, `Message to ${row.to_display} could not be delivered within ${Math.round(this.cfg.outboxTtlMs / 3_600_000)}h and was dropped.`)
     }
+  }
+
+  // --- pairing (see pair.ts) ---------------------------------------------------------------------------
+
+  /** Host side: opens the LAN port for one joining PC and returns the code to type there. */
+  async startPairing(opts: { address?: string; port?: number; ttlS?: number }): Promise<Record<string, unknown>> {
+    const l = this.listening
+    const port = opts.port ?? l?.port ?? DEFAULT_PORT
+    let address = opts.address
+    if (!address) address = l && !isWildcard(l.host) && l.host !== '127.0.0.1' ? l.host : lanAddresses()[0]
+    if (!address) throw new ApiError('BAD_REQUEST', 'no LAN address of this PC found; pass --address <IP of this PC>')
+    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, 10), 3600)
+
+    if (this.pairing) {
+      clearTimeout(this.pairing.timer)
+      this.pairing.state = 'cancelled'
+      this.pairing.secret = ''
+    }
+    const reachable = this.listening && this.listening.port === port && (this.listening.host === address || isWildcard(this.listening.host))
+    if (!reachable) {
+      await this.stopListener()
+      await this.startListener({ host: address, port })
+      if (!this.listening) {
+        const why = this.listenError ?? 'unknown error'
+        await this.restoreListener()
+        throw new ApiError('INTERNAL', `cannot listen on ${address}:${port}: ${why}`)
+      }
+    }
+    const secret = randomBytes(16).toString('hex')
+    const timer = setTimeout(() => this.endPairing('expired'), ttlS * 1000)
+    timer.unref()
+    this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1000, failures: 0, state: 'waiting', host: null, detail: null, timer }
+    this.log(`pairing opened on ${address}:${port} for ${ttlS}s`)
+    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost }
+  }
+
+  pairStatus(): Record<string, unknown> {
+    const p = this.pairing
+    if (!p) return { state: 'none' }
+    return { state: p.state, host: p.host, detail: p.detail, expires_s: Math.max(0, Math.round((p.expiresAt - Date.now()) / 1000)) }
+  }
+
+  cancelPairing(): Record<string, unknown> {
+    if (this.pairing?.state === 'waiting') this.endPairing('cancelled')
+    return this.pairStatus()
+  }
+
+  private endPairing(state: PairOutcome, host: string | null = null, detail: string | null = null): void {
+    const p = this.pairing
+    if (!p || p.state !== 'waiting') return
+    clearTimeout(p.timer)
+    p.state = state
+    p.host = host
+    p.detail = detail
+    p.secret = ''
+    this.log(`pairing ${state}${host ? ` with ${host}` : ''}${detail ? `: ${detail}` : ''}`)
+    // The port was only opened for pairing; go back to what peers.json asks for. After a success `apply` follows anyway.
+    if (state !== 'paired') void this.restoreListener()
+  }
+
+  private async restoreListener(): Promise<void> {
+    try {
+      await this.apply(loadPeersConfig(this.home, this.selfHost))
+    } catch (e) {
+      this.log(`could not restore the listener: ${String(e)}`)
+    }
+  }
+
+  /** Host side: a joining PC sent a `pair` frame. */
+  private onPair(ws: WebSocket, f: Record<string, unknown>): void {
+    const refuse = (code: string) => {
+      try {
+        ws.send(JSON.stringify({ t: 'error', code }))
+      } catch {
+        // closing anyway
+      }
+      ws.close(1008, 'refused')
+    }
+    const p = this.pairing
+    if (!p || p.state !== 'waiting' || Date.now() > p.expiresAt) return refuse('UNAUTHORIZED')
+    const host = typeof f.host === 'string' ? f.host.toLowerCase() : ''
+    if (f.v !== 1 || !HOST_RE.test(host) || host === this.selfHost) return refuse('BAD_REQUEST')
+    if (!proofMatches(f.proof, pairProof(p.secret, host))) {
+      p.failures++
+      this.log(`pairing: wrong proof from "${host.slice(0, 64)}" (${p.failures}/${MAX_PAIR_FAILURES})`)
+      if (p.failures >= MAX_PAIR_FAILURES) this.endPairing('failed', null, 'too many wrong attempts')
+      return refuse('UNAUTHORIZED')
+    }
+    try {
+      upsertPeerFile(this.home, { name: host, token: linkToken(p.secret), dial: false }, { host: p.address, port: p.port })
+    } catch (e) {
+      this.endPairing('failed', null, e instanceof Error ? e.message : String(e))
+      return refuse('INTERNAL')
+    }
+    this.endPairing('paired', host)
+    ws.send(JSON.stringify({ t: 'paired', v: 1, host: this.selfHost }), () => {
+      ws.close(1000, 'paired')
+      void this.restoreListener()
+    })
+  }
+
+  /** Joining side: connects to the host that made `codeText`, proves the code and records the host in peers.json. */
+  joinPairing(codeText: string): Promise<{ host: string; address: string; port: number }> {
+    const c = decodeCode(codeText)
+    if (typeof c === 'string') throw new ApiError('BAD_REQUEST', c)
+    if (c.fingerprint === this.tls.fingerprint) throw new ApiError('BAD_REQUEST', 'this code was made by this PC; run "agentctl pair <code>" on the other PC')
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`wss://${c.address}:${c.port}`, { rejectUnauthorized: false, handshakeTimeout: HANDSHAKE_MS, maxPayload: MAX_FRAME, minVersion: 'TLSv1.2' })
+      let settled = false
+      const finish = (err: ApiError | null, value?: { host: string; address: string; port: number }) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (err) {
+          try {
+            ws.terminate()
+          } catch {
+            // already closed
+          }
+          reject(err)
+        } else {
+          ws.close(1000, 'paired')
+          resolve(value as { host: string; address: string; port: number })
+        }
+      }
+      const timer = setTimeout(() => finish(new ApiError('INTERNAL', `no answer from ${c.address}:${c.port} within 15 s`)), 15_000)
+      ws.on('open', () => {
+        const sock = (ws as unknown as { _socket?: { getPeerCertificate?: () => { fingerprint256?: string } } })._socket
+        const got = normalizeFingerprint(sock?.getPeerCertificate?.().fingerprint256 ?? '')
+        if (got !== c.fingerprint) {
+          return finish(new ApiError('FORBIDDEN', `the certificate at ${c.address}:${c.port} does not match the code (wrong code, or another PC answers on that address)`))
+        }
+        ws.send(JSON.stringify({ t: 'pair', v: 1, host: this.selfHost, proof: pairProof(c.secret, this.selfHost) }))
+      })
+      ws.on('message', (data, isBinary) => {
+        const f = parseFrame(data, isBinary)
+        if (!f) return finish(new ApiError('INTERNAL', 'unexpected reply from the other PC'))
+        if (f.t === 'error') return finish(new ApiError('FORBIDDEN', `the other PC refused the code (${String(f.code)}): it may have expired, been used already, or be mistyped`))
+        const peerHost = f.t === 'paired' && typeof f.host === 'string' ? f.host.toLowerCase() : ''
+        if (!HOST_RE.test(peerHost) || peerHost === this.selfHost) return finish(new ApiError('INTERNAL', 'unexpected reply from the other PC'))
+        try {
+          upsertPeerFile(this.home, { name: peerHost, address: c.address, port: c.port, token: linkToken(c.secret), fingerprint: displayFingerprint(c.fingerprint), dial: true })
+        } catch (e) {
+          return finish(new ApiError('INTERNAL', e instanceof Error ? e.message : String(e)))
+        }
+        this.apply(loadPeersConfig(this.home, this.selfHost)).then(
+          () => finish(null, { host: peerHost, address: c.address, port: c.port }),
+          e => finish(new ApiError('INTERNAL', String(e))),
+        )
+      })
+      ws.on('error', e => finish(new ApiError('INTERNAL', `cannot reach ${c.address}:${c.port}: ${e.message}. Is TCP ${c.port} open in the firewall of that PC?`)))
+      ws.on('close', () => finish(new ApiError('INTERNAL', 'the other PC closed the connection before pairing finished')))
+    })
   }
 
   // --- listener (inbound links) ------------------------------------------------------------
@@ -379,6 +554,7 @@ export class PeerManager implements RemoteGateway {
       if (host === null) {
         // Handshake phase.
         if (initiator === 'peer') {
+          if (f.t === 'pair') return this.onPair(ws, f)
           const peer = f.t === 'hello' && f.v === 1 && typeof f.host === 'string' ? this.config.peers.find(p => p.name === f.host) : undefined
           if (!peer || !tokenMatches(f.token, peer.token)) {
             this.log(`rejected inbound peer "${String(f.host).slice(0, 64)}": ${peer ? 'bad token' : 'not in peers.json'}`)

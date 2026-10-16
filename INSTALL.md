@@ -101,7 +101,7 @@ starts the daemon and prints its host name.
 - Messages that arrive are shown to Claude with the next prompt, right after a tool call, or when a turn ends. They are
   always labelled as untrusted input from another agent. A session that is completely idle receives them with its next input.
 - `agentctl` (from the plugin's `bin/`) is on the PATH of Claude's Bash tool: `agentctl list`, `agentctl peers`.
-- To connect other PCs, create `peers.json` as described in [docs/LAN.md](docs/LAN.md). To restrict who may message whom, see
+- To connect another PC, run `agentctl pair` on one PC and `agentctl pair <code>` on the other (see [docs/LAN.md](docs/LAN.md)). To restrict who may message whom, see
   [docs/ACL.md](docs/ACL.md).
 
 ## 6. Uninstall

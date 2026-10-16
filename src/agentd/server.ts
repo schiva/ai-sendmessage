@@ -19,6 +19,10 @@ export interface AdminHooks {
   aclCheck(from: string, to: string): Record<string, unknown>
   peersStatus(): Promise<Record<string, unknown>>
   reloadPeers(): Promise<Record<string, unknown>>
+  pairStart(p: { address?: string; port?: number; ttlS?: number }): Promise<Record<string, unknown>>
+  pairStatus(): Promise<Record<string, unknown>>
+  pairCancel(): Promise<Record<string, unknown>>
+  pairJoin(code: string): Promise<Record<string, unknown>>
 }
 
 function tokenMatches(given: unknown, expected: string): boolean {
@@ -185,6 +189,21 @@ export class Server extends EventEmitter {
         return this.admin ? await this.admin.peersStatus() : { peers: [] }
       case 'reload_peers':
         return this.admin ? await this.admin.reloadPeers() : {}
+      case 'pair_start': {
+        if (!this.admin) return {}
+        const port = p.port === undefined ? undefined : Number(p.port)
+        if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new ApiError('BAD_REQUEST', '"port" must be 1-65535')
+        const ttlS = p.ttl_s === undefined ? undefined : Number(p.ttl_s)
+        if (ttlS !== undefined && !Number.isFinite(ttlS)) throw new ApiError('BAD_REQUEST', '"ttl_s" must be a number')
+        return await this.admin.pairStart({ address: typeof p.address === 'string' && p.address.trim() ? p.address.trim() : undefined, port, ttlS })
+      }
+      case 'pair_status':
+        return this.admin ? await this.admin.pairStatus() : {}
+      case 'pair_cancel':
+        return this.admin ? await this.admin.pairCancel() : {}
+      case 'pair_join':
+        if (typeof p.code !== 'string' || p.code.trim() === '') throw new ApiError('BAD_REQUEST', '"code" is required')
+        return this.admin ? await this.admin.pairJoin(p.code) : {}
       case 'shutdown':
         return {}
       default:
