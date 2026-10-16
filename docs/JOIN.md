@@ -1,6 +1,6 @@
 # 새 PC를 붙이는 `agentctl join` 설계
 
-- 문서 상태: **설계 v0.2 (2026-10-16), 구현 전** (목표 버전 0.5.0). v0.1에 `asus`의 보안 검토와 `agy`의 사용성 검토를 반영했다.
+- 문서 상태: **설계 v0.2 (2026-10-16), 구현 완료 (implemented, see [JOIN-API.md](JOIN-API.md))** (데몬·프로토콜·SAS 모듈 구현 및 통합 테스트 완료, CLI는 [JOIN-API.md](JOIN-API.md) 4절 기준). v0.1에 `asus`의 보안 검토와 `agy`의 사용성 검토를 반영했다.
 - 사용자 요구: "새 PC가 받는 PC의 IP와 포트만 알면 연결되는 간단한 구조." 사용자 결정: 확인은 6자리 숫자 하나로 한다. 확인 없는 자동 승인 옵션은 넣지 않는다.
 
 ## 1. 사용자가 보는 흐름
@@ -32,7 +32,7 @@
    H가 받을 수 없으면(창이 닫힘, 대기 풀이 가득 참, 이름이 이상함, 예산 초과) `{t:'error', code}`로 끝내고, 이때 대기 요청은 만들지 않는다.
 2. H → J `{t:'join_challenge', v:1, host:<hostH>, nonce:<nonceH, 무작위 16바이트>}`
 3. J → H `{t:'join_reveal', v:1, nonce:<nonceJ>}`. H는 commit을 다시 계산해 비교한다. 다르면 그 요청을 삭제한다.
-4. 양쪽이 확인 번호를 계산한다. `SAS = BigInt(SHA-256("agentlink-join-v1-sas" ‖ role ‖ fpH ‖ hostJ ‖ hostH ‖ nonceJ ‖ nonceH)의 처음 8바이트) mod 10^6`을 6자리로 쓴다. 각 값은 길이 접두로 이어 붙인다. J는 번호를 화면에 표시하고 기다린다. H는 번호를 어디에도 내보내지 않는다.
+4. 양쪽이 확인 번호를 계산한다. `SAS = BigInt(SHA-256("agentlink-join-v1-sas" ‖ fpH ‖ hostJ ‖ hostH ‖ nonceJ ‖ nonceH)의 처음 8바이트) mod 10^6`을 6자리로 쓴다. 각 값은 길이 접두로 이어 붙인다. J는 번호를 화면에 표시하고 기다린다. H는 번호를 어디에도 내보내지 않는다.
 5. H의 사용자가 `agentctl pair approve <요청 id>`로 **그 요청 하나**를 승인한다. 입력한 번호는 그 요청의 SAS와만 상수 시간 비교한다. 다르면 그 요청의 실패 횟수가 늘고 3번이면 그 요청이 삭제된다.
 6. 맞으면 두 단계로 확정한다. (a) H가 무작위 토큰(32바이트)을 만들어 `{t:'joined', v:1, host:<hostH>, token}`을 같은 소켓으로 보낸다. (b) J가 `peers.json`에 `{name:hostH, address, port, token, fingerprint:<본 fpH>, dial:true}`를 쓰고 `{t:'join_done', v:1}`로 답한다. **H는 `join_done`을 받은 뒤에야** `{name:hostJ, token, dial:false}`를 `peers.json`에 쓴다. 승인 전에는 양쪽 모두 아무것도 저장하지 않고, J가 중간에 사라지면 H의 `peers.json`은 바뀌지 않는다. 파일은 임시 파일을 쓰고 이름을 바꾸는 방식으로 쓴다.
 
@@ -59,7 +59,7 @@
 
 ## 6. 새 PC의 동작과 오류
 
-- `agentctl join <주소>[:<포트>] [--wait <초>]`: 기본 **5분** 기다린다(창이 열린 시간과 같게). 기다리는 동안 번호와 "받는 PC의 사용자에게 알려 주세요" 안내를 표시한다.
+- `agentctl join <주소>[:<포트>] [--timeout <초>]`(로컬 API `wait_s`): 기본 **5분**(300초) 기다린다. 기다리는 동안 번호와 "받는 PC의 사용자에게 알려 주세요" 안내를 표시한다.
 - 시간이 지나거나 거부되면 이유를 알려 주고 아무것도 저장하지 않는다.
 - 연결이 거부되면(`ECONNREFUSED`) "그 PC에서 `agentctl pair --open`을 실행했는지 확인", 응답이 없으면 받는 PC의 방화벽(TCP 포트)과 주소를 안내한다(`pair`와 같은 구분).
 
