@@ -136,6 +136,8 @@ function plain<T>(row: unknown): T {
 
 export class Store {
   private db: DatabaseSync
+  /** Set when opening this database changed its schema, so that the daemon can say so in its log. */
+  upgrade: { from: number; to: number } | null = null
 
   constructor(file: string) {
     this.db = new DatabaseSync(file)
@@ -153,13 +155,16 @@ export class Store {
   private migrate(): void {
     const version = (): number => Number((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
     let v = version()
+    let before: number | null = v // null: a database that did not exist before this start, which is not an upgrade
     if (v > SCHEMA_VERSION) {
       throw new Error(`the database has schema version ${v} but this daemon only knows up to ${SCHEMA_VERSION}: it was written by a newer AgentLink, update before using it`)
     }
     if (v === 0) {
+      const existed = this.db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'agents'").get() !== undefined
       this.db.exec(BASE_SCHEMA) // a new database, or one from before versions existed (the statements then change nothing)
       this.db.exec('PRAGMA user_version = 1')
       v = 1
+      before = existed ? 1 : null
     }
     for (; v < SCHEMA_VERSION; v++) {
       this.db.exec('BEGIN')
@@ -172,6 +177,7 @@ export class Store {
         throw e
       }
     }
+    if (before !== null && v > before) this.upgrade = { from: before, to: v }
   }
 
   close(): void {
@@ -316,6 +322,12 @@ export class Store {
 
   outboxForPeer(peer: string): OutboxRow[] {
     return this.db.prepare('SELECT * FROM outbox WHERE peer=? ORDER BY created_ms, id').all(peer).map(r => plain<OutboxRow>(r))
+  }
+
+  /** How many messages wait for this peer and how many bytes their frames take. */
+  outboxUsage(peer: string): { count: number; bytes: number } {
+    const r = this.db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(frame)), 0) AS b FROM outbox WHERE peer=?').get(peer) as { n: number; b: number }
+    return { count: Number(r.n), bytes: Number(r.b) }
   }
 
   countOutbox(peer: string): number {

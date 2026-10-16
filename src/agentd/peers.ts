@@ -45,6 +45,9 @@ interface Link {
   alive: boolean
   agents: RemoteAgent[]
   pingTimer: NodeJS.Timeout
+  /** What the last list of agents sent to this peer looked like (without last_seen), and when it was sent. */
+  lastDirectory: string
+  lastDirectoryAt: number
 }
 
 interface Dialer {
@@ -150,6 +153,7 @@ export class PeerManager implements RemoteGateway {
   private listenRetryAt: number | null = null
   private lastListenFailure = ''
   private stopped = false
+  private unauthenticated: Array<{ ws: WebSocket; ip: string }> = []
 
   constructor(opts: { core: Core; store: Store; cfg: Config; home: string; tls: TlsMaterial; selfHost: string; log: (line: string) => void }) {
     this.core = opts.core
@@ -185,6 +189,16 @@ export class PeerManager implements RemoteGateway {
   }
 
   async send(host: string, frame: OutFrame, senderAgent: string, toDisplay: string): Promise<'stored' | 'queued_remote'> {
+    // A host that stays away must not make the outbox grow without bound. Only messages are refused: idle notices are small and expire.
+    if (frame.t === 'msg') {
+      const { count, bytes } = this.store.outboxUsage(host)
+      if (count >= this.cfg.outboxMaxMessages || bytes + JSON.stringify(frame).length > this.cfg.outboxMaxBytes) {
+        throw new ApiError(
+          'RATE_LIMITED',
+          `${count} message${count === 1 ? ' is' : 's are'} already waiting for ${host} (${Math.ceil(bytes / 1024)} KiB), the limit is ${this.cfg.outboxMaxMessages} messages or ${Math.round(this.cfg.outboxMaxBytes / 1024 / 1024)} MiB; ${host} has not been reachable. Try again when the link is up.`,
+        )
+      }
+    }
     this.store.insertOutbox({
       id: frame.id,
       peer: host,
@@ -307,7 +321,7 @@ export class PeerManager implements RemoteGateway {
     let address = opts.address
     if (!address) address = l && !isWildcard(l.host) && l.host !== '127.0.0.1' ? l.host : lanAddresses()[0]
     if (!address) throw new ApiError('BAD_REQUEST', 'no LAN address of this PC found; pass --address <IP of this PC>')
-    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, 10), 3600)
+    const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, this.cfg.pairMinTtlS), 3600)
 
     if (this.pairing) {
       clearTimeout(this.pairing.timer)
@@ -447,7 +461,16 @@ export class PeerManager implements RemoteGateway {
           e => finish(new ApiError('INTERNAL', String(e))),
         )
       })
-      ws.on('error', e => finish(new ApiError('INTERNAL', `cannot reach ${c.address}:${c.port}: ${e.message}. Is TCP ${c.port} open in the firewall of that PC?`)))
+      ws.on('error', e => {
+        const code = (e as NodeJS.ErrnoException).code
+        // The PC answered with "nothing is listening": its pairing is over (code expired or cancelled). No answer at all points at the
+        // firewall or at a wrong address.
+        const hint =
+          code === 'ECONNREFUSED'
+            ? `nothing is waiting for a pairing there: the code has probably expired or was cancelled. Run "agentctl pair" again on that PC.`
+            : `Is TCP ${c.port} allowed in the Windows Firewall of that PC (see docs/LAN.md, "Firewall rule"), and is ${c.address} the right address?`
+        finish(new ApiError('INTERNAL', `cannot reach ${c.address}:${c.port}: ${e.message}. ${hint}`))
+      })
       ws.on('close', () => finish(new ApiError('INTERNAL', 'the other PC closed the connection before pairing finished')))
     })
   }
@@ -458,7 +481,10 @@ export class PeerManager implements RemoteGateway {
     return new Promise(resolve => {
       const server = https.createServer({ key: this.tls.key, cert: this.tls.cert, minVersion: 'TLSv1.2' })
       const wss = new WebSocketServer({ server, maxPayload: MAX_FRAME })
-      wss.on('connection', ws => this.bind(ws, 'peer', null))
+      wss.on('connection', (ws, req) => {
+        this.admitUnauthenticated(ws, req.socket.remoteAddress ?? '')
+        this.bind(ws, 'peer', null, () => this.forgetUnauthenticated(ws))
+      })
       // ws re-emits the errors of the server it is attached to. Without a listener that is an uncaught exception, and a busy port or a
       // missing address would kill the daemon before the handler below runs. The server's own handler deals with it.
       wss.on('error', () => {})
@@ -500,6 +526,27 @@ export class PeerManager implements RemoteGateway {
       void this.startListener(want).then(() => this.scheduleListenRetry())
     }, this.cfg.listenRetryMs)
     this.listenRetry.unref()
+  }
+
+  /**
+   * Connections that have not said who they are yet are limited, so that idle sockets cannot use up the daemon: when the limit for
+   * one address (or the overall limit) is reached, the oldest of them is closed to make room. A peer that connects now is never turned
+   * away, and whoever opens many sockets only closes its own.
+   */
+  private admitUnauthenticated(ws: WebSocket, ip: string): void {
+    const drop = (entry: { ws: WebSocket }) => {
+      this.unauthenticated = this.unauthenticated.filter(e => e !== entry)
+      entry.ws.terminate()
+    }
+    const sameIp = this.unauthenticated.filter(e => e.ip === ip)
+    if (sameIp.length >= this.cfg.maxPreAuthPerIp) drop(sameIp[0])
+    if (this.unauthenticated.length >= this.cfg.maxPreAuth) drop(this.unauthenticated[0])
+    this.unauthenticated.push({ ws, ip })
+    ws.once('close', () => this.forgetUnauthenticated(ws))
+  }
+
+  private forgetUnauthenticated(ws: WebSocket): void {
+    this.unauthenticated = this.unauthenticated.filter(e => e.ws !== ws)
   }
 
   private stopListener(): Promise<void> {
@@ -675,6 +722,8 @@ export class PeerManager implements RemoteGateway {
       since: Date.now(),
       alive: true,
       agents: [],
+      lastDirectory: '',
+      lastDirectoryAt: 0,
       pingTimer: setInterval(() => {
         if (!link.alive) {
           ws.terminate()
@@ -708,9 +757,17 @@ export class PeerManager implements RemoteGateway {
 
   // --- frames ------------------------------------------------------------------------------------------
 
+  /** Sends the list of local agents unless this peer already has it: it goes out when it changed and at least every directoryKeepaliveMs. */
   private sendDirectory(link: Link): void {
+    const agents = this.core.localDirectory()
+    // last_seen moves whenever an agent is touched (a watcher does it every few seconds); it must not make every tick a change.
+    const signature = JSON.stringify(agents.map(a => ({ ...a, last_seen: 0 })))
+    const now = Date.now()
+    if (signature === link.lastDirectory && now - link.lastDirectoryAt < this.cfg.directoryKeepaliveMs) return
+    link.lastDirectory = signature
+    link.lastDirectoryAt = now
     try {
-      link.ws.send(JSON.stringify({ t: 'agents', agents: this.core.localDirectory() }))
+      link.ws.send(JSON.stringify({ t: 'agents', agents }))
     } catch {
       // the close handler cleans up
     }

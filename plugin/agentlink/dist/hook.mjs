@@ -1,9 +1,24 @@
 import { createRequire as __agentlinkCreateRequire } from 'node:module'; const require = __agentlinkCreateRequire(import.meta.url);
 
 // src/adapters/claude/hook.ts
-import fs3 from "node:fs";
+import fs4 from "node:fs";
 import path5 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// src/agentd/applog.ts
+import fs from "node:fs";
+var DEFAULT_LOG_MAX_BYTES = 1024 * 1024;
+function appendLog(file, line, maxBytes = DEFAULT_LOG_MAX_BYTES) {
+  try {
+    try {
+      if (fs.statSync(file).size >= maxBytes) fs.renameSync(file, `${file}.1`);
+    } catch {
+    }
+    fs.appendFileSync(file, line.endsWith("\n") ? line : `${line}
+`);
+  } catch {
+  }
+}
 
 // src/agentd/config.ts
 import os from "node:os";
@@ -22,16 +37,16 @@ function pipePath() {
 }
 
 // src/client/atomic-file.ts
-import fs from "node:fs";
+import fs2 from "node:fs";
 import { randomBytes } from "node:crypto";
 var sleepSync = (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 function writeFileAtomic(file, data) {
   const tmp = `${file}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
   try {
-    fs.writeFileSync(tmp, data);
+    fs2.writeFileSync(tmp, data);
     for (let attempt = 0; ; attempt++) {
       try {
-        fs.renameSync(tmp, file);
+        fs2.renameSync(tmp, file);
         return;
       } catch (e) {
         const code = e.code;
@@ -40,10 +55,10 @@ function writeFileAtomic(file, data) {
         sleepSync(3);
       }
     }
-    fs.writeFileSync(file, data);
+    fs2.writeFileSync(file, data);
   } finally {
     try {
-      fs.rmSync(tmp, { force: true });
+      fs2.rmSync(tmp, { force: true });
     } catch {
     }
   }
@@ -52,7 +67,7 @@ function readJsonStable(file, attempts = 6) {
   for (let i = 0; i < attempts; i++) {
     let text;
     try {
-      text = fs.readFileSync(file, "utf8");
+      text = fs2.readFileSync(file, "utf8");
     } catch (e) {
       if (e.code === "ENOENT") return null;
       sleepSync(5);
@@ -69,7 +84,7 @@ function readJsonStable(file, attempts = 6) {
 
 // src/client/client.ts
 import net from "node:net";
-import fs2 from "node:fs";
+import fs3 from "node:fs";
 import path2 from "node:path";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -132,7 +147,7 @@ async function readToken(home) {
   const file = path2.join(home, "token");
   for (let i = 0; i < TOKEN_WAIT_MS / 100; i++) {
     try {
-      const t = fs2.readFileSync(file, "utf8").trim();
+      const t = fs3.readFileSync(file, "utf8").trim();
       if (t) return t;
     } catch {
     }
@@ -237,7 +252,7 @@ function wakeCommand(agentctlFile, agent) {
 }
 
 // src/version.ts
-var VERSION = true ? "0.3.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.4.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function versionMismatchNote(daemonVersion, ownVersion = VERSION) {
   if (daemonVersion === ownVersion) return null;
   return `the running AgentLink daemon is version ${daemonVersion} but this installation is ${ownVersion}. Run "agentctl stop" to replace it; the next command starts the new one. End idle watchers (agentctl wake) of version 0.2.0 or older first, they would restart the old daemon.`;
@@ -273,6 +288,10 @@ function deriveIdentity(env, cwd) {
 // src/adapters/common/timing.ts
 var HOOK_START_TIMEOUT_MS = 5e3;
 var STOP_WAKE_WAIT_MS = 2e3;
+function stopWakeWaitMs(env = process.env) {
+  const v = Number(env.AGENTLINK_STOP_WAKE_WAIT_MS);
+  return env.AGENTLINK_STOP_WAKE_WAIT_MS !== void 0 && Number.isFinite(v) && v >= 0 ? Math.min(v, STOP_WAKE_WAIT_MS) : STOP_WAKE_WAIT_MS;
+}
 
 // src/adapters/common/format.ts
 function attr(v) {
@@ -324,7 +343,7 @@ function readState2(sessionId) {
 function writeState(sessionId, patch) {
   const next = { ...readState2(sessionId), ...patch };
   try {
-    fs3.mkdirSync(path5.dirname(statePath(sessionId)), { recursive: true });
+    fs4.mkdirSync(path5.dirname(statePath(sessionId)), { recursive: true });
     writeFileAtomic(statePath(sessionId), JSON.stringify(next));
   } catch {
   }
@@ -416,7 +435,7 @@ async function main() {
         }
         if (wakeEnabled() && !input.stop_hook_active) {
           const { nags } = readState2(sessionId);
-          if (wakeAlive(agent) || nags < MAX_WAKE_NAGS && await waitWakeAlive(agent, STOP_WAKE_WAIT_MS)) {
+          if (wakeAlive(agent) || nags < MAX_WAKE_NAGS && await waitWakeAlive(agent, stopWakeWaitMs())) {
             if (nags > 0) writeState(sessionId, { nags: 0 });
           } else if (nags < MAX_WAKE_NAGS) {
             writeState(sessionId, { nags: nags + 1 });
@@ -440,9 +459,8 @@ async function main() {
 }
 main().catch((e) => {
   try {
-    fs3.mkdirSync(homeDir(), { recursive: true });
-    fs3.appendFileSync(path5.join(homeDir(), "hook-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${process.argv[2]} ${String(e instanceof Error ? e.message : e)}
-`);
+    fs4.mkdirSync(homeDir(), { recursive: true });
+    appendLog(path5.join(homeDir(), "hook-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${process.argv[2]} ${String(e instanceof Error ? e.message : e)}`);
   } catch {
   }
 }).finally(() => process.exit(0));

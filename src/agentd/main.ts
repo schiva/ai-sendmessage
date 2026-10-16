@@ -44,6 +44,7 @@ const server = await (async () => {
     log(`cannot open the database: ${e instanceof Error ? e.message : String(e)}`)
     process.exit(1)
   }
+  if (store.upgrade) log(`database upgraded from schema ${store.upgrade.from} to ${store.upgrade.to}`)
   const host = hostName()
   const core = new Core(store, host, cfg)
   // The LAN layer starts after the pipe is bound, because creating the TLS identity can take a moment.
