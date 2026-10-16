@@ -2285,9 +2285,9 @@ var require_websocket = __commonJS({
     var EventEmitter3 = __require("events");
     var https2 = __require("https");
     var http = __require("http");
-    var net2 = __require("net");
+    var net3 = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes4, createHash } = __require("crypto");
+    var { randomBytes: randomBytes5, createHash: createHash2 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -2838,7 +2838,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes4(16).toString("base64");
+      const key = randomBytes5(16).toString("base64");
       const request = isSecure ? https2.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -2968,7 +2968,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -3042,12 +3042,12 @@ var require_websocket = __commonJS({
     }
     function netConnect(options) {
       options.path = options.socketPath;
-      return net2.connect(options);
+      return net3.connect(options);
     }
     function tlsConnect(options) {
       options.path = void 0;
       if (!options.servername && options.servername !== "") {
-        options.servername = net2.isIP(options.host) ? "" : options.host;
+        options.servername = net3.isIP(options.host) ? "" : options.host;
       }
       return tls.connect(options);
     }
@@ -3337,7 +3337,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter3 = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash } = __require("crypto");
+    var { createHash: createHash2 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -3644,7 +3644,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -22830,7 +22830,7 @@ var require_selfsigned = __commonJS({
 // src/agentd/main.ts
 import fs5 from "node:fs";
 import path5 from "node:path";
-import { randomBytes as randomBytes3 } from "node:crypto";
+import { randomBytes as randomBytes4 } from "node:crypto";
 
 // src/agentd/config.ts
 import os from "node:os";
@@ -22876,7 +22876,15 @@ function loadConfig() {
     outboxMaxBytes: num("AGENTLINK_OUTBOX_MAX_BYTES", 16 * 1024 * 1024),
     directoryKeepaliveMs: num("AGENTLINK_DIRECTORY_KEEPALIVE_MS", 3e4),
     maxPreAuth: num("AGENTLINK_MAX_PREAUTH", 32),
-    maxPreAuthPerIp: num("AGENTLINK_MAX_PREAUTH_PER_IP", 4)
+    maxPreAuthPerIp: num("AGENTLINK_MAX_PREAUTH_PER_IP", 4),
+    joinMinTtlS: num("AGENTLINK_JOIN_MIN_TTL_S", 10),
+    joinRequestMs: num("AGENTLINK_JOIN_REQUEST_MS", 3e5),
+    joinPendingMax: num("AGENTLINK_JOIN_PENDING_MAX", 8),
+    joinWindowBudget: num("AGENTLINK_JOIN_WINDOW_BUDGET", 20),
+    joinIpIntervalMs: process.env.AGENTLINK_JOIN_IP_INTERVAL_MS === void 0 ? 5e3 : Math.max(0, Number(process.env.AGENTLINK_JOIN_IP_INTERVAL_MS) || 0),
+    joinGlobalBurst: num("AGENTLINK_JOIN_GLOBAL_BURST", 3),
+    joinRevealMs: num("AGENTLINK_JOIN_REVEAL_MS", 5e3),
+    joinDoneMs: num("AGENTLINK_JOIN_DONE_MS", 1e4)
   };
 }
 
@@ -23021,11 +23029,11 @@ var Core = class {
     return pool[0];
   }
   takeToken(agent) {
-    const now = Date.now();
+    const now2 = Date.now();
     const perMs = this.cfg.ratePerMin / 6e4;
-    const b = this.buckets.get(agent) ?? { tokens: this.cfg.rateBurst, last: now };
-    b.tokens = Math.min(this.cfg.rateBurst, b.tokens + (now - b.last) * perMs);
-    b.last = now;
+    const b = this.buckets.get(agent) ?? { tokens: this.cfg.rateBurst, last: now2 };
+    b.tokens = Math.min(this.cfg.rateBurst, b.tokens + (now2 - b.last) * perMs);
+    b.last = now2;
     this.buckets.set(agent, b);
     if (b.tokens < 1) return false;
     b.tokens -= 1;
@@ -23101,11 +23109,11 @@ var Core = class {
     const pidRaw = p.pid;
     const pid = typeof pidRaw === "number" && Number.isInteger(pidRaw) ? pidRaw : null;
     const key = str(p, "key", { max: 256 }) ?? `anon:${randomBytes(8).toString("hex")}`;
-    const now = Date.now();
+    const now2 = Date.now();
     const existing = this.store.getAgentByKey(key);
     if (existing) {
       const status = this.isLive(existing) ? existing.status : "idle";
-      this.store.reviveAgent(existing.agent, { name, kind, cwd, pid, status }, now);
+      this.store.reviveAgent(existing.agent, { name, kind, cwd, pid, status }, now2);
       const a2 = this.store.getAgent(existing.agent);
       return { agent: a2.agent, name: a2.name, ref: a2.ref, address: this.address(a2), resumed: true, unread: this.store.countState(a2.agent, "new") };
     }
@@ -23121,8 +23129,8 @@ var Core = class {
       pid,
       status: "idle",
       active: 1,
-      last_seen: now,
-      registered_at: now
+      last_seen: now2,
+      registered_at: now2
     };
     this.store.insertAgent(a);
     return { agent: a.agent, name, ref, address: this.address(a), resumed: false, unread: 0 };
@@ -23174,11 +23182,11 @@ var Core = class {
     const targetKey = local ? local.agent : `${t.host}|${t.name}|${t.ref ?? ""}`;
     const dupKey = `${from.agent}|${targetKey}|${message}`;
     const seen = this.recent.get(dupKey);
-    const now = Date.now();
-    if (seen !== void 0 && now - seen < this.cfg.dupWindowMs) {
+    const now2 = Date.now();
+    if (seen !== void 0 && now2 - seen < this.cfg.dupWindowMs) {
       throw new ApiError("LOOP_DETECTED", "an identical message was just sent to this agent; dropped");
     }
-    this.recent.set(dupKey, now);
+    this.recent.set(dupKey, now2);
     if (local) {
       const row = this.deliver(local, { from: this.fromAddress(from), kind: "message", summary, message, reply_to: replyTo }, false);
       if (!row) throw new ApiError("RATE_LIMITED", `the inbox of ${this.address(local)} is full`);
@@ -23193,7 +23201,7 @@ var Core = class {
       kind: "message",
       summary,
       message,
-      ts: Math.floor(now / 1e3),
+      ts: Math.floor(now2 / 1e3),
       reply_to: replyTo,
       ttl: 3
     };
@@ -23390,22 +23398,22 @@ var Core = class {
     this.store.markState([id], agent, "delivered", ["new"]);
   }
   sweep() {
-    const now = Date.now();
+    const now2 = Date.now();
     for (const target of this.store.idleSubTargets()) {
       const a = this.store.getAgent(target);
       if (!a) continue;
       if (this.statusOf(a) === "offline") this.fireIdle(a, "offline");
     }
-    this.store.deleteAckedBefore(now - LIMITS.ackedRetentionMs);
-    for (const id of this.store.inactiveAgentsWithoutMessages(now - LIMITS.inactiveAgentGcMs)) this.store.deleteAgent(id);
-    for (const [k, t] of this.recent) if (now - t > this.cfg.dupWindowMs) this.recent.delete(k);
-    for (const [k, b] of this.buckets) if (now - b.last > 12e4) this.buckets.delete(k);
+    this.store.deleteAckedBefore(now2 - LIMITS.ackedRetentionMs);
+    for (const id of this.store.inactiveAgentsWithoutMessages(now2 - LIMITS.inactiveAgentGcMs)) this.store.deleteAgent(id);
+    for (const [k, t] of this.recent) if (now2 - t > this.cfg.dupWindowMs) this.recent.delete(k);
+    for (const [k, b] of this.buckets) if (now2 - b.last > 12e4) this.buckets.delete(k);
   }
 };
 
 // src/agentd/peers.ts
 import https from "node:https";
-import { randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { randomBytes as randomBytes3, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 
 // node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -23572,9 +23580,449 @@ function loadPeersConfig(home2, selfHost) {
   }
 }
 
+// src/agentd/join.ts
+import { randomBytes as randomBytes2 } from "node:crypto";
+import net from "node:net";
+
+// src/agentd/join-sas.ts
+import { createHash, timingSafeEqual } from "node:crypto";
+var HOST_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+function lp(x) {
+  const body = typeof x === "string" ? Buffer.from(x, "utf8") : x;
+  const len = Buffer.allocUnsafe(4);
+  len.writeUInt32BE(body.length, 0);
+  return Buffer.concat([len, body]);
+}
+function fingerprintBytes(fp) {
+  if (typeof fp !== "string") throw new TypeError("fingerprint must be a 64-character hex string");
+  const stripped = fp.replace(/^sha-?256[:=]?/i, "").replace(/:/g, "");
+  if (!/^[0-9a-fA-F]{64}$/.test(stripped)) {
+    throw new TypeError(`invalid SHA-256 fingerprint: "${fp}"`);
+  }
+  return Buffer.from(stripped.toLowerCase(), "hex");
+}
+function joinCommit(hostJ, nonceJ) {
+  if (typeof hostJ !== "string") throw new TypeError("hostJ must be a string");
+  if (!Buffer.isBuffer(nonceJ)) throw new TypeError("nonceJ must be a Buffer");
+  return createHash("sha256").update(lp("agentlink-join-v1-commit")).update(lp(hostJ)).update(lp(nonceJ)).digest("hex");
+}
+function joinSas(fpH, hostJ, hostH, nonceJ, nonceH) {
+  const fp = fingerprintBytes(fpH);
+  if (typeof hostJ !== "string" || typeof hostH !== "string") throw new TypeError("host names must be strings");
+  if (!Buffer.isBuffer(nonceJ) || !Buffer.isBuffer(nonceH)) throw new TypeError("nonces must be Buffers");
+  const h = createHash("sha256").update(lp("agentlink-join-v1-sas")).update(lp(fp)).update(lp(hostJ)).update(lp(hostH)).update(lp(nonceJ)).update(lp(nonceH)).digest();
+  const code = BigInt("0x" + h.subarray(0, 8).toString("hex")) % 1000000n;
+  return code.toString(10).padStart(6, "0");
+}
+function parseDigits(input) {
+  if (typeof input !== "string") return null;
+  const cleaned = input.replace(/[\s.-]+/g, "");
+  return /^[0-9]{6}$/.test(cleaned) ? cleaned : null;
+}
+function normalizeHostName(raw) {
+  if (typeof raw !== "string") return null;
+  const lower = raw.toLowerCase();
+  if (!HOST_NAME_RE.test(lower) || lower.endsWith(".")) return null;
+  return lower;
+}
+function sasEquals(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+}
+
+// src/agentd/join.ts
+var now = () => performance.now();
+var ID_RE = /^[0-9a-f]{4}$/;
+var NONCE_HEX_RE = /^[0-9a-f]{32}$/;
+var TOKEN_HEX_RE = /^[0-9a-f]{64}$/;
+var REQUEST_ATTEMPTS = 3;
+var WINDOW_ATTEMPTS = 5;
+var PROTOCOL_ERRORS = 3;
+var PROTOCOL_BACKOFF_MS = 6e4;
+var RECENT_KEPT = 5;
+var REASON_TEXT = {
+  window_closed: 'the other PC is not accepting new PCs; run "agentctl pair --open" there first',
+  busy: "the other PC has too many requests waiting (or one from this address already); try again in a moment",
+  bad_name: "the other PC does not accept this host name",
+  rate_limited: "too many attempts at the other PC; wait a few seconds and try again",
+  rejected: "the other PC turned the request down",
+  request_gone: "the request is gone (it expired or the window closed)",
+  bad_order: "protocol error (frames in the wrong order)",
+  bad_commit: "protocol error (the revealed value does not match)",
+  bad_frame: "protocol error (malformed frame)"
+};
+var JoinService = class {
+  host;
+  cfg;
+  log;
+  window = null;
+  sessions = /* @__PURE__ */ new Map();
+  byWs = /* @__PURE__ */ new Map();
+  recent = [];
+  ipLast = /* @__PURE__ */ new Map();
+  ipErrors = /* @__PURE__ */ new Map();
+  starts = [];
+  outgoing = /* @__PURE__ */ new Map();
+  constructor(host, cfg2, log2) {
+    this.host = host;
+    this.cfg = cfg2;
+    this.log = log2;
+  }
+  isOpen() {
+    return this.window !== null;
+  }
+  // --- receiving side: the window --------------------------------------------------------------------------
+  async open(opts) {
+    const ttlS = Math.min(Math.max(opts.ttlS ?? 600, this.cfg.joinMinTtlS), 3600);
+    const count = Math.min(Math.max(Math.floor(opts.count ?? 1), 1), 8);
+    if (this.window) await this.close("reopened");
+    const where = await this.host.openLanPort(opts.address, opts.port);
+    const timer = setTimeout(() => void this.close("expired"), ttlS * 1e3);
+    timer.unref();
+    this.window = { expiresAt: now() + ttlS * 1e3, count, failures: 0, started: 0, address: where.address, port: where.port, timer };
+    this.log(`join window opened on ${where.address}:${where.port} for ${ttlS}s (${count} PC${count === 1 ? "" : "s"})`);
+    return {
+      open: true,
+      expires_s: ttlS,
+      count,
+      host: this.host.selfHost,
+      address: where.address,
+      port: where.port,
+      command: `agentctl join ${where.address}${where.port === 7420 ? "" : `:${where.port}`}`
+    };
+  }
+  async close(reason) {
+    const w = this.window;
+    if (!w) return { open: false };
+    clearTimeout(w.timer);
+    this.window = null;
+    for (const s of [...this.sessions.values()]) this.dropSession(s, s.state === "handshake" ? "failed" : "expired", "window_closed");
+    this.log(`join window closed (${reason})`);
+    await this.host.closeLanPort();
+    return { open: false };
+  }
+  pending() {
+    const w = this.window;
+    const t = now();
+    return {
+      open: w !== null,
+      expires_s: w ? Math.max(0, Math.round((w.expiresAt - t) / 1e3)) : null,
+      remaining: w ? w.count : 0,
+      requests: [...this.sessions.values()].filter((s) => s.state !== "handshake").map((s) => ({ id: s.id, host: s.host, address: s.ip, age_s: Math.round((t - s.since) / 1e3), state: s.state, replaces: s.replaces })),
+      recent: this.recent.slice(-RECENT_KEPT).map((r) => ({ host: r.host, address: r.address, result: r.result, ago_s: Math.round((t - r.at) / 1e3) }))
+    };
+  }
+  remember(s, result) {
+    this.recent.push({ host: s.host, address: s.ip, result, at: now() });
+    if (this.recent.length > 50) this.recent.shift();
+  }
+  /** Ends a session: tells the new PC why (unless it is gone already), closes its socket and forgets it. */
+  dropSession(s, result, reason) {
+    if (!this.sessions.delete(s.id)) return;
+    this.byWs.delete(s.ws);
+    if (s.timer) clearTimeout(s.timer);
+    if (s.state !== "handshake") this.remember(s, result);
+    const finish = s.finish;
+    s.finish = null;
+    try {
+      s.ws.send(JSON.stringify({ t: "error", code: "FORBIDDEN", reason }));
+    } catch {
+    }
+    try {
+      s.ws.close(1008, reason);
+    } catch {
+    }
+    finish?.(false);
+  }
+  // --- receiving side: frames of the protocol (called for connections that have not identified themselves) ---
+  /** Returns 'keep' when the socket now belongs to a join session (the caller stops its handshake timer), 'close' when it was turned away. */
+  onFrame(ws, f, ip) {
+    if (f.t === "join") return this.onJoin(ws, f, ip);
+    const s = this.byWs.get(ws);
+    if (!s) return this.turnAway(ws, ip, "bad_order", true);
+    if (f.t === "join_reveal") return this.onReveal(s, f);
+    if (f.t === "join_done") {
+      if (s.state !== "approving" || !s.finish) return this.turnAway(ws, ip, "bad_order", true);
+      const finish = s.finish;
+      s.finish = null;
+      finish(true);
+      return "keep";
+    }
+    return this.turnAway(ws, ip, "bad_frame", true);
+  }
+  turnAway(ws, ip, reason, protocolError) {
+    if (protocolError) {
+      const e = this.ipErrors.get(ip) ?? { count: 0, until: 0 };
+      e.count++;
+      if (e.count >= PROTOCOL_ERRORS) e.until = now() + PROTOCOL_BACKOFF_MS;
+      this.ipErrors.set(ip, e);
+    }
+    const s = this.byWs.get(ws);
+    if (s) this.dropSession(s, "failed", reason);
+    else {
+      try {
+        ws.send(JSON.stringify({ t: "error", code: "FORBIDDEN", reason }));
+      } catch {
+      }
+      ws.close(1008, reason);
+    }
+    return "close";
+  }
+  onJoin(ws, f, ip) {
+    const w = this.window;
+    const t = now();
+    if (!w || t > w.expiresAt) return this.turnAway(ws, ip, "window_closed", false);
+    if (this.byWs.has(ws)) return this.turnAway(ws, ip, "bad_order", true);
+    const blocked = this.ipErrors.get(ip);
+    if (blocked && blocked.until > t) return this.turnAway(ws, ip, "rate_limited", false);
+    this.starts = this.starts.filter((x) => t - x < 5e3);
+    const last = this.ipLast.get(ip);
+    if (w.started >= this.cfg.joinWindowBudget || this.starts.length >= this.cfg.joinGlobalBurst || last !== void 0 && t - last < this.cfg.joinIpIntervalMs) {
+      return this.turnAway(ws, ip, "rate_limited", false);
+    }
+    w.started++;
+    this.starts.push(t);
+    this.ipLast.set(ip, t);
+    const host = typeof f.host === "string" ? normalizeHostName(f.host) : null;
+    if (f.v !== 1 || typeof f.commit !== "string" || !/^[0-9a-f]{64}$/.test(f.commit)) return this.turnAway(ws, ip, "bad_frame", true);
+    if (host === null || host === this.host.selfHost) return this.turnAway(ws, ip, "bad_name", true);
+    if (this.sessions.size >= this.cfg.joinPendingMax || [...this.sessions.values()].some((s2) => s2.ip === ip)) return this.turnAway(ws, ip, "busy", false);
+    let id = randomBytes2(2).toString("hex");
+    while (this.sessions.has(id)) id = randomBytes2(2).toString("hex");
+    const known = this.host.peerAddress(host);
+    const s = {
+      id,
+      ws,
+      ip,
+      host,
+      commit: f.commit,
+      nonceH: randomBytes2(16),
+      sas: null,
+      state: "handshake",
+      failures: 0,
+      since: t,
+      timer: null,
+      replaces: known === null ? null : { host, address: known === "" ? "(connects to this PC only)" : known },
+      finish: null
+    };
+    s.timer = setTimeout(() => this.dropSession(s, "failed", "bad_order"), this.cfg.joinRevealMs);
+    s.timer.unref();
+    this.sessions.set(id, s);
+    this.byWs.set(ws, s);
+    ws.once("close", () => this.onClosed(ws));
+    ws.send(JSON.stringify({ t: "join_challenge", v: 1, host: this.host.selfHost, nonce: s.nonceH.toString("hex") }));
+    return "keep";
+  }
+  onReveal(s, f) {
+    if (s.state !== "handshake") return this.turnAway(s.ws, s.ip, "bad_order", true);
+    if (f.v !== 1 || typeof f.nonce !== "string" || !NONCE_HEX_RE.test(f.nonce)) return this.turnAway(s.ws, s.ip, "bad_frame", true);
+    const nonceJ = Buffer.from(f.nonce, "hex");
+    if (joinCommit(s.host, nonceJ) !== s.commit) return this.turnAway(s.ws, s.ip, "bad_commit", true);
+    s.sas = joinSas(this.host.fingerprint, s.host, this.host.selfHost, nonceJ, s.nonceH);
+    s.state = "pending";
+    if (s.timer) clearTimeout(s.timer);
+    s.timer = setTimeout(() => this.dropSession(s, "expired", "request_gone"), this.cfg.joinRequestMs);
+    s.timer.unref();
+    this.log(`join request ${s.id} from ${s.host} (${s.ip})${s.replaces ? ` replaces the peer ${s.replaces.host}` : ""}`);
+    return "keep";
+  }
+  onClosed(ws) {
+    const s = this.byWs.get(ws);
+    if (!s) return;
+    this.dropSession(s, s.state === "handshake" ? "failed" : "expired", "request_gone");
+  }
+  // --- receiving side: the approval (local API) -----------------------------------------------------------------
+  async approve(idRaw, digitsRaw) {
+    const id = typeof idRaw === "string" ? idRaw.toLowerCase() : "";
+    const w = this.window;
+    if (!w) throw new ApiError("FORBIDDEN", 'no join window is open (run "agentctl pair --open")', { reason: "window_closed" });
+    const s = ID_RE.test(id) ? this.sessions.get(id) : void 0;
+    if (!s || s.state === "handshake") throw new ApiError("BAD_REQUEST", `no request "${String(idRaw).slice(0, 12)}" is waiting (see "agentctl pair pending")`, { reason: "unknown_request" });
+    if (s.state === "approving") throw new ApiError("FORBIDDEN", `request ${s.id} is already being approved`, { reason: "request_gone" });
+    const digits = typeof digitsRaw === "string" ? parseDigits(digitsRaw) : null;
+    if (digits === null) throw new ApiError("BAD_REQUEST", "the confirmation number has 6 digits", { reason: "bad_digits" });
+    if (s.sas === null || !sasEquals(digits, s.sas)) {
+      s.failures++;
+      w.failures++;
+      if (w.failures >= WINDOW_ATTEMPTS) {
+        await this.close("too many wrong numbers");
+        throw new ApiError("FORBIDDEN", "too many wrong numbers: the window is closed", { reason: "window_closed" });
+      }
+      if (s.failures >= REQUEST_ATTEMPTS) {
+        this.dropSession(s, "rejected", "rejected");
+        throw new ApiError("FORBIDDEN", `wrong number: request ${s.id} was deleted`, { reason: "wrong_digits", attempts_left: 0 });
+      }
+      throw new ApiError("FORBIDDEN", `wrong number (${REQUEST_ATTEMPTS - s.failures} more tries for this request)`, { reason: "wrong_digits", attempts_left: REQUEST_ATTEMPTS - s.failures });
+    }
+    s.state = "approving";
+    if (s.timer) clearTimeout(s.timer);
+    const token2 = randomBytes2(32).toString("hex");
+    const confirmed = new Promise((resolve) => {
+      s.finish = resolve;
+      s.timer = setTimeout(() => this.dropSession(s, "failed", "request_gone"), this.cfg.joinDoneMs);
+      s.timer.unref();
+    });
+    try {
+      s.ws.send(JSON.stringify({ t: "joined", v: 1, host: this.host.selfHost, token: token2 }));
+    } catch {
+      this.dropSession(s, "failed", "request_gone");
+    }
+    if (!await confirmed || this.sessions.get(s.id) !== s) {
+      throw new ApiError("FORBIDDEN", `the new PC did not confirm (request ${s.id} is gone); nothing was saved`, { reason: "request_gone" });
+    }
+    if (s.timer) clearTimeout(s.timer);
+    await this.host.addJoinedPeer(s.host, token2, { host: w.address, port: w.port });
+    this.sessions.delete(s.id);
+    this.byWs.delete(s.ws);
+    this.remember(s, "joined");
+    this.log(`join request ${s.id}: ${s.host} (${s.ip}) is a peer now${s.replaces ? " (replaced the earlier entry)" : ""}`);
+    try {
+      s.ws.close(1e3, "joined");
+    } catch {
+    }
+    w.count--;
+    if (w.count <= 0) await this.close("approved");
+    return { ok: true, host: s.host, address: s.ip };
+  }
+  // --- joining side ---------------------------------------------------------------------------------------------------
+  /** Connects to the receiving PC and returns the confirmation number once it is known; the rest happens in the background. */
+  start(opts) {
+    const address = typeof opts.address === "string" ? opts.address.trim() : "";
+    if (!net.isIPv4(address)) throw new ApiError("BAD_REQUEST", "the address must be an IPv4 address like 192.168.0.5 (host names are not accepted)");
+    const port = opts.port === void 0 ? 7420 : Number(opts.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new ApiError("BAD_REQUEST", '"port" must be 1-65535');
+    const waitS = opts.waitS === void 0 ? 300 : Math.min(Math.max(Number(opts.waitS) || 300, 5), 3600);
+    for (const o of this.outgoing.values()) if (o.state === "waiting") throw new ApiError("BAD_REQUEST", "a join is already in progress; cancel it first (join_cancel)");
+    const out = new Outgoing(randomBytes2(4).toString("hex"), address, port);
+    this.outgoing.set(out.id, out);
+    if (this.outgoing.size > 20) this.outgoing.delete(this.outgoing.keys().next().value);
+    return out.run(this.host, waitS * 1e3, this.log);
+  }
+  status(request) {
+    const o = typeof request === "string" ? this.outgoing.get(request) : void 0;
+    if (!o) throw new ApiError("BAD_REQUEST", "no such join request");
+    return { state: o.state, waited_s: Math.round((now() - o.since) / 1e3), ...o.hostH ? { host: o.hostH } : {}, ...o.detail ? { detail: o.detail } : {} };
+  }
+  cancel(request) {
+    const o = typeof request === "string" ? this.outgoing.get(request) : void 0;
+    if (!o) throw new ApiError("BAD_REQUEST", "no such join request");
+    o.finish("cancelled", "cancelled");
+    return { state: o.state };
+  }
+  stop() {
+    if (this.window) clearTimeout(this.window.timer);
+    for (const s of this.sessions.values()) if (s.timer) clearTimeout(s.timer);
+    for (const o of this.outgoing.values()) o.finish("cancelled", "the daemon is stopping");
+  }
+};
+var Outgoing = class {
+  id;
+  address;
+  port;
+  state = "waiting";
+  detail = null;
+  hostH = null;
+  since = now();
+  ws = null;
+  timer = null;
+  constructor(id, address, port) {
+    this.id = id;
+    this.address = address;
+    this.port = port;
+  }
+  finish(state, detail) {
+    if (this.state !== "waiting") return;
+    this.state = state;
+    this.detail = detail;
+    if (this.timer) clearTimeout(this.timer);
+    try {
+      this.ws?.close(state === "joined" ? 1e3 : 1008, state);
+    } catch {
+    }
+  }
+  run(host, waitMs, log2) {
+    return new Promise((resolve, reject) => {
+      const nonceJ = randomBytes2(16);
+      const hostJ = host.selfHost;
+      let fpH = "";
+      let hostH = "";
+      let answered = false;
+      const fail = (err) => {
+        this.finish("failed", err.message);
+        if (!answered) {
+          answered = true;
+          reject(err);
+        }
+      };
+      const ws = new import_websocket.default(`wss://${this.address}:${this.port}`, { rejectUnauthorized: false, handshakeTimeout: 8e3, maxPayload: 4096, minVersion: "TLSv1.2" });
+      this.ws = ws;
+      this.timer = setTimeout(() => {
+        this.finish("expired", "nobody approved the request in time");
+        if (!answered) {
+          answered = true;
+          reject(new ApiError("INTERNAL", `no answer from ${this.address}:${this.port} in time`));
+        }
+      }, waitMs);
+      this.timer.unref();
+      ws.on("open", () => {
+        const sock = ws._socket;
+        fpH = normalizeFingerprint(sock?.getPeerCertificate?.().fingerprint256 ?? "");
+        if (fpH.length !== 64) return fail(new ApiError("INTERNAL", "could not read the certificate of the other PC"));
+        ws.send(JSON.stringify({ t: "join", v: 1, host: hostJ, commit: joinCommit(hostJ, nonceJ) }));
+      });
+      ws.on("message", (data, isBinary) => {
+        let f = null;
+        try {
+          const parsed = isBinary ? null : JSON.parse(data.toString());
+          f = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+        } catch {
+          f = null;
+        }
+        if (!f) return fail(new ApiError("INTERNAL", "unexpected reply from the other PC"));
+        if (f.t === "error") {
+          const reason = typeof f.reason === "string" ? f.reason : "";
+          return fail(new ApiError("FORBIDDEN", REASON_TEXT[reason] ?? `the other PC refused (${String(f.code)})`, { reason }));
+        }
+        if (f.t === "join_challenge" && !answered) {
+          const name = typeof f.host === "string" ? normalizeHostName(f.host) : null;
+          if (f.v !== 1 || name === null || name === hostJ || typeof f.nonce !== "string" || !NONCE_HEX_RE.test(f.nonce)) return fail(new ApiError("INTERNAL", "unexpected reply from the other PC"));
+          hostH = name;
+          this.hostH = name;
+          ws.send(JSON.stringify({ t: "join_reveal", v: 1, nonce: nonceJ.toString("hex") }));
+          const sas = joinSas(fpH, hostJ, hostH, nonceJ, Buffer.from(f.nonce, "hex"));
+          answered = true;
+          resolve({ request: this.id, sas });
+          return;
+        }
+        if (f.t === "joined" && answered && this.state === "waiting") {
+          const name = typeof f.host === "string" ? normalizeHostName(f.host) : null;
+          if (f.v !== 1 || name !== hostH || typeof f.token !== "string" || !TOKEN_HEX_RE.test(f.token)) return this.finish("failed", "unexpected reply from the other PC");
+          host.addHostPeer({ name: hostH, address: this.address, port: this.port, token: f.token, fingerprint: displayFingerprint(fpH) }).then(() => {
+            ws.send(JSON.stringify({ t: "join_done", v: 1 }));
+            this.finish("joined", null);
+            log2(`joined ${hostH} at ${this.address}:${this.port}`);
+          }).catch((e) => this.finish("failed", String(e instanceof Error ? e.message : e)));
+          return;
+        }
+        fail(new ApiError("INTERNAL", "unexpected reply from the other PC"));
+      });
+      ws.on("error", (e) => {
+        const code = e.code;
+        const hint = code === "ECONNREFUSED" ? 'nothing is listening there: run "agentctl pair --open" on that PC first' : `is TCP ${this.port} allowed in the Windows Firewall of that PC (see docs/LAN.md, "Firewall rule"), and is ${this.address} the right address?`;
+        fail(new ApiError("INTERNAL", `cannot reach ${this.address}:${this.port}: ${e.message}. ${hint}`));
+      });
+      ws.on("close", () => {
+        if (this.state === "waiting") fail(new ApiError("INTERNAL", "the other PC closed the connection before the request was approved"));
+      });
+    });
+  }
+};
+
 // src/agentd/pair.ts
 import os2 from "node:os";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 var CODE_PREFIX = "AL1-";
 var DEFAULT_PAIR_TTL_S = 600;
 var MAX_PAIR_FAILURES = 5;
@@ -23612,7 +24060,7 @@ function proofMatches(given, expected) {
   if (typeof given !== "string") return false;
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return a.length === b.length && timingSafeEqual2(a, b);
 }
 var VIRTUAL_ADAPTER = /vethernet|wsl|hyper-v|virtualbox|vbox|vmware|docker|loopback|bluetooth|tailscale|zerotier|hamachi|vpn|\btap\b|\btun\b/i;
 function isPrivateIpv4(ip) {
@@ -23632,6 +24080,7 @@ function lanAddresses(ifaces = os2.networkInterfaces()) {
 
 // src/agentd/peers.ts
 var MAX_FRAME = 512 * 1024;
+var MAX_PREAUTH_FRAME = 4096;
 var HANDSHAKE_MS = 5e3;
 var MAX_REMOTE_AGENTS = 200;
 var KNOWN_CODES = /* @__PURE__ */ new Set([
@@ -23657,7 +24106,11 @@ function tokenMatches(given, expected) {
   if (typeof given !== "string") return false;
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual2(a, b);
+  return a.length === b.length && timingSafeEqual3(a, b);
+}
+function rawLength(d) {
+  if (Array.isArray(d)) return d.reduce((n, b) => n + b.length, 0);
+  return d instanceof ArrayBuffer ? d.byteLength : d.length;
 }
 function parseFrame(data, isBinary) {
   if (isBinary) return null;
@@ -23713,6 +24166,9 @@ var PeerManager = class {
   lastListenFailure = "";
   stopped = false;
   unauthenticated = [];
+  ipOf = /* @__PURE__ */ new WeakMap();
+  /** Joining a new PC (docs/JOIN.md). */
+  join;
   constructor(opts) {
     this.core = opts.core;
     this.store = opts.store;
@@ -23721,6 +24177,25 @@ var PeerManager = class {
     this.tls = opts.tls;
     this.selfHost = opts.selfHost;
     this.log = opts.log;
+    this.join = new JoinService(
+      {
+        selfHost: opts.selfHost,
+        fingerprint: opts.tls.fingerprint,
+        openLanPort: (address, port) => this.ensureLanPort(address, port),
+        closeLanPort: () => this.releaseLanPort(),
+        peerAddress: (name) => this.config.peers.find((p) => p.name === name)?.address ?? (this.config.peers.some((p) => p.name === name) ? "" : null),
+        addJoinedPeer: async (name, token2, listen) => {
+          upsertPeerFile(this.home, { name, token: token2, dial: false }, listen);
+          await this.apply(loadPeersConfig(this.home, this.selfHost));
+        },
+        addHostPeer: async (entry) => {
+          upsertPeerFile(this.home, { ...entry, dial: true });
+          await this.apply(loadPeersConfig(this.home, this.selfHost));
+        }
+      },
+      opts.cfg,
+      opts.log
+    );
   }
   // --- RemoteGateway ---------------------------------------------------------------
   knownHost(host) {
@@ -23834,6 +24309,7 @@ var PeerManager = class {
   }
   async stop() {
     this.stopped = true;
+    this.join.stop();
     if (this.listenRetry) clearTimeout(this.listenRetry);
     this.listenRetry = null;
     this.listenRetryAt = null;
@@ -23856,19 +24332,31 @@ var PeerManager = class {
   // --- pairing (see pair.ts) ---------------------------------------------------------------------------
   /** Host side: opens the LAN port for one joining PC and returns the code to type there. */
   async startPairing(opts) {
-    const l = this.listening;
-    const port = opts.port ?? l?.port ?? DEFAULT_PORT;
-    let address = opts.address;
-    if (!address) address = l && !isWildcard(l.host) && l.host !== "127.0.0.1" ? l.host : lanAddresses()[0];
-    if (!address) throw new ApiError("BAD_REQUEST", "no LAN address of this PC found; pass --address <IP of this PC>");
     const ttlS = Math.min(Math.max(opts.ttlS ?? DEFAULT_PAIR_TTL_S, this.cfg.pairMinTtlS), 3600);
     if (this.pairing) {
       clearTimeout(this.pairing.timer);
       this.pairing.state = "cancelled";
       this.pairing.secret = "";
     }
+    const { address, port } = await this.ensureLanPort(opts.address, opts.port);
+    const secret = randomBytes3(16).toString("hex");
+    const timer = setTimeout(() => this.endPairing("expired"), ttlS * 1e3);
+    timer.unref();
+    this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1e3, failures: 0, state: "waiting", host: null, detail: null, timer };
+    this.log(`pairing opened on ${address}:${port} for ${ttlS}s`);
+    const others = lanAddresses().filter((a) => a !== address);
+    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost, other_addresses: others };
+  }
+  /** Opens the LAN port for a pairing or a join window (or finds it open) and says where it is. */
+  async ensureLanPort(addressOpt, portOpt) {
+    const l = this.listening;
+    const port = portOpt ?? l?.port ?? DEFAULT_PORT;
+    let address = addressOpt;
+    if (!address) address = l && !isWildcard(l.host) && l.host !== "127.0.0.1" ? l.host : lanAddresses()[0];
+    if (!address) throw new ApiError("BAD_REQUEST", "no LAN address of this PC found; pass --address <IP of this PC>");
     const reachable = this.listening && this.listening.port === port && (this.listening.host === address || isWildcard(this.listening.host));
     if (!reachable) {
+      if (this.join.isOpen()) throw new ApiError("BAD_REQUEST", `a join window is open on ${this.listening?.host}:${this.listening?.port}; close it first ("agentctl pair --close") to use another address or port`);
       await this.stopListener();
       await this.startListener({ host: address, port });
       if (!this.listening) {
@@ -23877,13 +24365,12 @@ var PeerManager = class {
         throw new ApiError("INTERNAL", `cannot listen on ${address}:${port}: ${why}`);
       }
     }
-    const secret = randomBytes2(16).toString("hex");
-    const timer = setTimeout(() => this.endPairing("expired"), ttlS * 1e3);
-    timer.unref();
-    this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1e3, failures: 0, state: "waiting", host: null, detail: null, timer };
-    this.log(`pairing opened on ${address}:${port} for ${ttlS}s`);
-    const others = lanAddresses().filter((a) => a !== address);
-    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost, other_addresses: others };
+    return { address, port };
+  }
+  /** A pairing or join window is over: the port goes back to what peers.json asks for, unless the other kind of window still needs it. */
+  async releaseLanPort() {
+    if (this.pairing?.state === "waiting" || this.join.isOpen()) return;
+    await this.restoreListener();
   }
   pairStatus() {
     const p = this.pairing;
@@ -23903,7 +24390,7 @@ var PeerManager = class {
     p.detail = detail;
     p.secret = "";
     this.log(`pairing ${state}${host ? ` with ${host}` : ""}${detail ? `: ${detail}` : ""}`);
-    if (state !== "paired") void this.restoreListener();
+    if (state !== "paired") void this.releaseLanPort();
   }
   async restoreListener() {
     try {
@@ -23940,7 +24427,7 @@ var PeerManager = class {
     this.endPairing("paired", host);
     ws.send(JSON.stringify({ t: "paired", v: 1, host: this.selfHost }), () => {
       ws.close(1e3, "paired");
-      void this.restoreListener();
+      void this.releaseLanPort();
     });
   }
   /** Joining side: connects to the host that made `codeText`, proves the code and records the host in peers.json. */
@@ -24061,6 +24548,7 @@ var PeerManager = class {
     const sameIp = this.unauthenticated.filter((e) => e.ip === ip);
     if (sameIp.length >= this.cfg.maxPreAuthPerIp) drop(sameIp[0]);
     if (this.unauthenticated.length >= this.cfg.maxPreAuth) drop(this.unauthenticated[0]);
+    this.ipOf.set(ws, ip);
     this.unauthenticated.push({ ws, ip });
     ws.once("close", () => this.forgetUnauthenticated(ws));
   }
@@ -24155,6 +24643,10 @@ var PeerManager = class {
     ws.on("error", () => {
     });
     ws.on("message", (data, isBinary) => {
+      if (host === null && initiator === "peer" && rawLength(data) > MAX_PREAUTH_FRAME) {
+        ws.terminate();
+        return;
+      }
       const f = parseFrame(data, isBinary);
       if (!f) {
         ws.terminate();
@@ -24163,6 +24655,13 @@ var PeerManager = class {
       if (host === null) {
         if (initiator === "peer") {
           if (f.t === "pair") return this.onPair(ws, f);
+          if (f.t === "join" || f.t === "join_reveal" || f.t === "join_done") {
+            if (this.join.onFrame(ws, f, this.ipOf.get(ws) ?? "") === "keep") {
+              clearTimeout(authTimer);
+              this.forgetUnauthenticated(ws);
+            }
+            return;
+          }
           const peer = f.t === "hello" && f.v === 1 && typeof f.host === "string" ? this.config.peers.find((p) => p.name === f.host) : void 0;
           if (!peer || !tokenMatches(f.token, peer.token)) {
             this.log(`rejected inbound peer "${String(f.host).slice(0, 64)}": ${peer ? "bad token" : "not in peers.json"}`);
@@ -24264,10 +24763,10 @@ var PeerManager = class {
   sendDirectory(link) {
     const agents = this.core.localDirectory();
     const signature = JSON.stringify(agents.map((a) => ({ ...a, last_seen: 0 })));
-    const now = Date.now();
-    if (signature === link.lastDirectory && now - link.lastDirectoryAt < this.cfg.directoryKeepaliveMs) return;
+    const now2 = Date.now();
+    if (signature === link.lastDirectory && now2 - link.lastDirectoryAt < this.cfg.directoryKeepaliveMs) return;
     link.lastDirectory = signature;
-    link.lastDirectoryAt = now;
+    link.lastDirectoryAt = now2;
     try {
       link.ws.send(JSON.stringify({ t: "agents", agents }));
     } catch {
@@ -24277,9 +24776,9 @@ var PeerManager = class {
     for (const l of this.links.values()) this.sendDirectory(l);
   }
   flush(link) {
-    const now = Date.now();
+    const now2 = Date.now();
     for (const row of this.store.outboxForPeer(link.host)) {
-      if (row.next_try_ms > now) continue;
+      if (row.next_try_ms > now2) continue;
       try {
         link.ws.send(row.frame);
       } catch {
@@ -24309,15 +24808,15 @@ var PeerManager = class {
   }
   /** Sends the refused messages whose retry time has come over the links that are up. */
   retryDue() {
-    const now = Date.now();
+    const now2 = Date.now();
     for (const link of this.links.values()) {
-      for (const row of this.store.outboxDue(link.host, now)) {
+      for (const row of this.store.outboxDue(link.host, now2)) {
         try {
           link.ws.send(row.frame);
         } catch {
           break;
         }
-        this.store.retryOutbox(row.id, row.attempts, now + RETRY_ANSWER_WAIT_MS);
+        this.store.retryOutbox(row.id, row.attempts, now2 + RETRY_ANSWER_WAIT_MS);
       }
     }
   }
@@ -24350,14 +24849,14 @@ var PeerManager = class {
 };
 
 // src/agentd/server.ts
-import net from "node:net";
-import { timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import net2 from "node:net";
+import { timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import { EventEmitter as EventEmitter2 } from "node:events";
 function tokenMatches2(given, expected) {
   if (typeof given !== "string") return false;
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual3(a, b);
+  return a.length === b.length && timingSafeEqual4(a, b);
 }
 var Server = class extends EventEmitter2 {
   core;
@@ -24372,7 +24871,7 @@ var Server = class extends EventEmitter2 {
     this.token = token2;
     this.log = log2;
     this.admin = admin;
-    this.srv = net.createServer((socket) => this.onConnection(socket));
+    this.srv = net2.createServer((socket) => this.onConnection(socket));
     core.events.on("message", (agent, row) => this.push(agent, row));
   }
   listen(pipe) {
@@ -24523,6 +25022,35 @@ var Server = class extends EventEmitter2 {
       case "pair_join":
         if (typeof p.code !== "string" || p.code.trim() === "") throw new ApiError("BAD_REQUEST", '"code" is required');
         return this.admin ? await this.admin.pairJoin(p.code) : {};
+      case "join_open": {
+        if (!this.admin) return {};
+        const num2 = (v, name) => {
+          if (v === void 0) return void 0;
+          const n = Number(v);
+          if (!Number.isFinite(n)) throw new ApiError("BAD_REQUEST", `"${name}" must be a number`);
+          return n;
+        };
+        const port = num2(p.port, "port");
+        if (port !== void 0 && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new ApiError("BAD_REQUEST", '"port" must be 1-65535');
+        return await this.admin.joinOpen({
+          ttlS: num2(p.ttl_s, "ttl_s"),
+          count: num2(p.count, "count"),
+          address: typeof p.address === "string" && p.address.trim() ? p.address.trim() : void 0,
+          port
+        });
+      }
+      case "join_close":
+        return this.admin ? await this.admin.joinClose() : {};
+      case "join_pending":
+        return this.admin ? await this.admin.joinPending() : {};
+      case "join_approve":
+        return this.admin ? await this.admin.joinApprove(p.id, p.digits) : {};
+      case "join_start":
+        return this.admin ? await this.admin.joinStart({ address: p.address, port: p.port, waitS: p.wait_s }) : {};
+      case "join_status":
+        return this.admin ? await this.admin.joinStatus(p.request) : {};
+      case "join_cancel":
+        return this.admin ? await this.admin.joinCancel(p.request) : {};
       case "shutdown":
         return {};
       default:
@@ -24777,11 +25305,11 @@ var Store = class {
       "INSERT INTO agents (agent,key,name,ref,kind,cwd,pid,status,active,last_seen,registered_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
     ).run(a.agent, a.key, a.name, a.ref, a.kind, a.cwd, a.pid, a.status, a.active, a.last_seen, a.registered_at);
   }
-  reviveAgent(id, fields, now) {
-    this.db.prepare("UPDATE agents SET name=?, kind=?, cwd=?, pid=?, status=?, active=1, last_seen=? WHERE agent=?").run(fields.name, fields.kind, fields.cwd, fields.pid, fields.status, now, id);
+  reviveAgent(id, fields, now2) {
+    this.db.prepare("UPDATE agents SET name=?, kind=?, cwd=?, pid=?, status=?, active=1, last_seen=? WHERE agent=?").run(fields.name, fields.kind, fields.cwd, fields.pid, fields.status, now2, id);
   }
-  touch(id, now) {
-    this.db.prepare("UPDATE agents SET last_seen=? WHERE agent=?").run(now, id);
+  touch(id, now2) {
+    this.db.prepare("UPDATE agents SET last_seen=? WHERE agent=?").run(now2, id);
   }
   setStatus(id, status) {
     this.db.prepare("UPDATE agents SET status=? WHERE agent=?").run(status, id);
@@ -24846,8 +25374,8 @@ var Store = class {
     this.db.prepare("UPDATE outbox SET attempts=?, next_try_ms=? WHERE id=?").run(attempts, nextTryMs, id);
   }
   /** Messages that were refused for a passing reason and whose time to try again has come. */
-  outboxDue(peer, now) {
-    return this.db.prepare("SELECT * FROM outbox WHERE peer=? AND attempts>0 AND next_try_ms<=? ORDER BY created_ms, id").all(peer, now).map((r) => plain(r));
+  outboxDue(peer, now2) {
+    return this.db.prepare("SELECT * FROM outbox WHERE peer=? AND attempts>0 AND next_try_ms<=? ORDER BY created_ms, id").all(peer, now2).map((r) => plain(r));
   }
   outboxForPeer(peer) {
     return this.db.prepare("SELECT * FROM outbox WHERE peer=? ORDER BY created_ms, id").all(peer).map((r) => plain(r));
@@ -24868,16 +25396,16 @@ var Store = class {
     return this.db.prepare("SELECT * FROM outbox WHERE created_ms < ?").all(cutoffMs).map((r) => plain(r));
   }
   // --- idle subscriptions -----------------------------------------------------
-  upsertIdleSub(requester, target, now) {
-    this.db.prepare("INSERT OR REPLACE INTO idle_subs (requester,target,created_at) VALUES (?,?,?)").run(requester, target, now);
+  upsertIdleSub(requester, target, now2) {
+    this.db.prepare("INSERT OR REPLACE INTO idle_subs (requester,target,created_at) VALUES (?,?,?)").run(requester, target, now2);
   }
   takeIdleSubs(target) {
     const rows = this.db.prepare("SELECT * FROM idle_subs WHERE target=?").all(target).map((r) => plain(r));
     this.db.prepare("DELETE FROM idle_subs WHERE target=?").run(target);
     return rows;
   }
-  upsertRemoteIdleSub(host, requesterAddr, targetAgent, now) {
-    this.db.prepare("INSERT OR REPLACE INTO remote_idle_subs (host,requester_addr,target_agent,created_at) VALUES (?,?,?,?)").run(host, requesterAddr, targetAgent, now);
+  upsertRemoteIdleSub(host, requesterAddr, targetAgent, now2) {
+    this.db.prepare("INSERT OR REPLACE INTO remote_idle_subs (host,requester_addr,target_agent,created_at) VALUES (?,?,?,?)").run(host, requesterAddr, targetAgent, now2);
   }
   takeRemoteIdleSubs(targetAgent) {
     const rows = this.db.prepare("SELECT * FROM remote_idle_subs WHERE target_agent=?").all(targetAgent).map((r) => plain(r));
@@ -24906,7 +25434,7 @@ function log(line) {
 }
 function ensureToken(file) {
   try {
-    const t = randomBytes3(32).toString("hex");
+    const t = randomBytes4(32).toString("hex");
     fs5.writeFileSync(file, t, { flag: "wx" });
     return t;
   } catch (e) {
@@ -24970,6 +25498,30 @@ var server = await (async () => {
     },
     pairStatus: async () => peers ? peers.pairStatus() : { state: "none" },
     pairCancel: async () => peers ? peers.cancelPairing() : { state: "none" },
+    joinOpen: async (o) => {
+      await waitForLan();
+      if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
+      return peers.join.open(o);
+    },
+    joinClose: async () => peers ? peers.join.close("closed by the user") : { open: false },
+    joinPending: async () => peers ? { ...peers.join.pending() } : { open: false, expires_s: null, remaining: 0, requests: [], recent: [] },
+    joinApprove: async (id, digits) => {
+      if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
+      return { ...await peers.join.approve(id, digits) };
+    },
+    joinStart: async (o) => {
+      await waitForLan();
+      if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
+      return { ...await peers.join.start(o) };
+    },
+    joinStatus: async (request) => {
+      if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
+      return peers.join.status(request);
+    },
+    joinCancel: async (request) => {
+      if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
+      return peers.join.cancel(request);
+    },
     pairJoin: async (code) => {
       await waitForLan();
       if (!peers) throw new ApiError("INTERNAL", "the LAN layer did not start; see agentd.log");
