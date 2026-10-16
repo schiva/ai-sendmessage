@@ -62,7 +62,9 @@ function startDaemon(env) {
   });
   child.unref();
 }
-async function connectWithAutostart(pipe, autostart, env, home) {
+var DEFAULT_START_TIMEOUT_MS = 8e3;
+var TOKEN_WAIT_MS = 3e3;
+async function connectWithAutostart(pipe, autostart, env, home, startTimeoutMs) {
   try {
     return await tryConnect(pipe);
   } catch (e) {
@@ -70,7 +72,7 @@ async function connectWithAutostart(pipe, autostart, env, home) {
     if (!autostart || code !== "ENOENT" && code !== "ECONNREFUSED") throw e;
   }
   startDaemon(env);
-  const deadline = Date.now() + 8e3;
+  const deadline = Date.now() + startTimeoutMs;
   let last;
   while (Date.now() < deadline) {
     await sleep(100);
@@ -80,11 +82,11 @@ async function connectWithAutostart(pipe, autostart, env, home) {
       last = e;
     }
   }
-  throw new Error(`agentd did not start within 8s (${String(last?.message ?? last)}); see ${path2.join(home, "agentd.log")}`);
+  throw new Error(`agentd did not start within ${Math.round(startTimeoutMs / 100) / 10}s (${String(last?.message ?? last)}); see ${path2.join(home, "agentd.log")}`);
 }
 async function readToken(home) {
   const file = path2.join(home, "token");
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < TOKEN_WAIT_MS / 100; i++) {
     try {
       const t = fs.readFileSync(file, "utf8").trim();
       if (t) return t;
@@ -123,7 +125,7 @@ var Client = class _Client extends EventEmitter {
     if (opts.home) env.AGENTLINK_HOME = opts.home;
     const pipe = opts.pipe ?? opts.env?.AGENTLINK_PIPE ?? pipePath();
     const home = opts.home ?? opts.env?.AGENTLINK_HOME ?? homeDir();
-    const socket = await connectWithAutostart(pipe, opts.autostart ?? true, env, home);
+    const socket = await connectWithAutostart(pipe, opts.autostart ?? true, env, home, opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
     const c = new _Client(socket);
     const token = await readToken(home);
     c.hello = await c.request("hello", { v: 1, client: "agentlink-client", token });
@@ -172,32 +174,87 @@ var Client = class _Client extends EventEmitter {
 };
 
 // src/version.ts
-var VERSION = true ? "0.2.3" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+var VERSION = true ? "0.3.0" : JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function versionMismatchNote(daemonVersion, ownVersion = VERSION) {
   if (daemonVersion === ownVersion) return null;
   return `the running AgentLink daemon is version ${daemonVersion} but this installation is ${ownVersion}. Run "agentctl stop" to replace it; the next command starts the new one. End idle watchers (agentctl wake) of version 0.2.0 or older first, they would restart the old daemon.`;
 }
 
 // src/client/wake.ts
-import fs2 from "node:fs";
+import fs3 from "node:fs";
 import path3 from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+
+// src/client/atomic-file.ts
+import fs2 from "node:fs";
+import { randomBytes } from "node:crypto";
+var sleepSync = (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function writeFileAtomic(file, data) {
+  const tmp = `${file}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
+  try {
+    fs2.writeFileSync(tmp, data);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        fs2.renameSync(tmp, file);
+        return;
+      } catch (e) {
+        const code = e.code;
+        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw e;
+        if (attempt >= 8) break;
+        sleepSync(3);
+      }
+    }
+    fs2.writeFileSync(file, data);
+  } finally {
+    try {
+      fs2.rmSync(tmp, { force: true });
+    } catch {
+    }
+  }
+}
+function readJsonStable(file, attempts = 6) {
+  for (let i = 0; i < attempts; i++) {
+    let text;
+    try {
+      text = fs2.readFileSync(file, "utf8");
+    } catch (e) {
+      if (e.code === "ENOENT") return null;
+      sleepSync(5);
+      continue;
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      sleepSync(5);
+    }
+  }
+  return null;
+}
+
+// src/client/wake.ts
 var WAKE_KINDS = /* @__PURE__ */ new Set(["message", "idle_notice"]);
 function stateFile(agent) {
   return path3.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.json`);
 }
-function readState(agent) {
+function stopFile(agent) {
+  return path3.join(homeDir(), "hook-state", `${agent.replace(/[^A-Za-z0-9_-]/g, "_")}.wake.stop`);
+}
+var stopRequested = (agent) => fs3.existsSync(stopFile(agent));
+function clearStopRequest(agent) {
   try {
-    const s = JSON.parse(fs2.readFileSync(stateFile(agent), "utf8"));
-    return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [], stop: s.stop === true };
+    fs3.rmSync(stopFile(agent), { force: true });
   } catch {
-    return { pid: 0, ts: 0, wakes: [] };
   }
+}
+function readState(agent) {
+  const s = readJsonStable(stateFile(agent));
+  if (s === null || typeof s !== "object") return { pid: 0, ts: 0, wakes: [] };
+  return { pid: Number(s.pid) || 0, ts: Number(s.ts) || 0, wakes: Array.isArray(s.wakes) ? s.wakes.filter((n) => typeof n === "number") : [], stop: s.stop === true };
 }
 function writeState(agent, s) {
   try {
-    fs2.mkdirSync(path3.dirname(stateFile(agent)), { recursive: true });
-    fs2.writeFileSync(stateFile(agent), JSON.stringify(s));
+    fs3.mkdirSync(path3.dirname(stateFile(agent)), { recursive: true });
+    writeFileAtomic(stateFile(agent), JSON.stringify(s));
   } catch {
   }
 }
@@ -245,6 +302,7 @@ var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitForWake(connect, o) {
   const deadline = Date.now() + o.maxMs;
   let client = null;
+  clearStopRequest(o.agent);
   writeState(o.agent, { ...readState(o.agent), stop: false });
   try {
     for (; ; ) {
@@ -253,7 +311,7 @@ async function waitForWake(connect, o) {
       try {
         client ??= await connect();
         const st = readState(o.agent);
-        if (st.stop) return { reason: "stopped" };
+        if (stopRequested(o.agent) || st.stop) return { reason: "stopped" };
         writeState(o.agent, { ...st, pid: process.pid, ts: Date.now() });
         const r = await client.request("inbox", { agent: o.agent, mode: "peek", state: "new", limit: 50, wait_ms: o.pollMs });
         let wakeable = r.messages.filter((m) => WAKE_KINDS.has(m.kind)).length;
@@ -282,26 +340,31 @@ async function waitForWake(connect, o) {
     }
   } finally {
     client?.close();
+    clearStopRequest(o.agent);
     const st = readState(o.agent);
     writeState(o.agent, { ...st, pid: 0, ts: 0, stop: false });
   }
 }
 function watcherAgents() {
   try {
-    return fs2.readdirSync(path3.join(homeDir(), "hook-state")).map((f) => /^(.+)\.wake\.json$/.exec(f)?.[1]).filter((a) => typeof a === "string");
+    return fs3.readdirSync(path3.join(homeDir(), "hook-state")).map((f) => /^(.+)\.wake\.json$/.exec(f)?.[1]).filter((a) => typeof a === "string");
   } catch {
     return [];
   }
 }
 function isWatcherProcess(pid) {
-  if (process.platform !== "win32") return false;
-  const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], {
-    encoding: "utf8",
-    timeout: 1e4,
-    windowsHide: true
+  if (process.platform !== "win32") return Promise.resolve(false);
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+      { encoding: "utf8", timeout: 1e4, windowsHide: true },
+      (err, stdout) => {
+        const line = err ? "" : stdout ?? "";
+        resolve(/agentctl\.(mjs|ts)/.test(line) && /\swake(\s|$)/.test(line));
+      }
+    );
   });
-  const line = r.status === 0 ? r.stdout ?? "" : "";
-  return /agentctl\.(mjs|ts)/.test(line) && /\swake(\s|$)/.test(line);
 }
 async function gone(pid, ms) {
   const end = Date.now() + ms;
@@ -311,36 +374,40 @@ async function gone(pid, ms) {
   }
   return true;
 }
-async function stopWatchers(agent, graceMs = 8e3) {
-  const reports = [];
-  for (const a of agent ? [agent] : watcherAgents()) {
-    const st = readState(a);
-    if (st.pid === 0 || !pidExists(st.pid)) {
-      if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false });
-      reports.push({ agent: a, pid: st.pid, how: "not-running" });
-      continue;
-    }
-    writeState(a, { ...st, stop: true });
-    if (await gone(st.pid, graceMs)) {
-      reports.push({ agent: a, pid: st.pid, how: "requested" });
-      continue;
-    }
-    if (!isWatcherProcess(st.pid)) {
-      writeState(a, { ...readState(a), stop: false });
-      reports.push({ agent: a, pid: st.pid, how: "refused", detail: "the recorded PID is not an agentctl watcher (not touched)" });
-      continue;
-    }
-    try {
-      process.kill(st.pid);
-    } catch (e) {
-      reports.push({ agent: a, pid: st.pid, how: "refused", detail: String(e instanceof Error ? e.message : e) });
-      continue;
-    }
-    const ended = await gone(st.pid, 3e3);
-    writeState(a, { ...readState(a), pid: ended ? 0 : st.pid, ts: 0, stop: false });
-    reports.push(ended ? { agent: a, pid: st.pid, how: "killed" } : { agent: a, pid: st.pid, how: "refused", detail: "it did not end" });
+async function stopOne(a, graceMs) {
+  const st = readState(a);
+  if (st.pid === 0 || !pidExists(st.pid) || !await isWatcherProcess(st.pid)) {
+    if (st.pid !== 0) writeState(a, { ...st, pid: 0, ts: 0, stop: false });
+    clearStopRequest(a);
+    return { agent: a, pid: st.pid, how: "not-running" };
   }
-  return reports;
+  try {
+    fs3.writeFileSync(stopFile(a), "");
+  } catch {
+  }
+  writeState(a, { ...st, stop: true });
+  if (await gone(st.pid, graceMs)) {
+    clearStopRequest(a);
+    return { agent: a, pid: st.pid, how: "requested" };
+  }
+  if (!await isWatcherProcess(st.pid)) {
+    clearStopRequest(a);
+    writeState(a, { ...readState(a), stop: false });
+    return { agent: a, pid: st.pid, how: "refused", detail: "the recorded PID is not an agentctl watcher (not touched)" };
+  }
+  try {
+    process.kill(st.pid);
+  } catch (e) {
+    clearStopRequest(a);
+    return { agent: a, pid: st.pid, how: "refused", detail: String(e instanceof Error ? e.message : e) };
+  }
+  const ended = await gone(st.pid, 3e3);
+  clearStopRequest(a);
+  writeState(a, { ...readState(a), pid: ended ? 0 : st.pid, ts: 0, stop: false });
+  return ended ? { agent: a, pid: st.pid, how: "killed" } : { agent: a, pid: st.pid, how: "refused", detail: "it did not end" };
+}
+async function stopWatchers(agent, graceMs = 8e3) {
+  return Promise.all((agent ? [agent] : watcherAgents()).map((a) => stopOne(a, graceMs)));
 }
 
 // src/client/agentctl.ts
@@ -465,7 +532,7 @@ async function main() {
     const lines = [
       `host:        ${r.host ?? client.hello.host}`,
       `fingerprint: ${r.fingerprint ?? "(starting)"}`,
-      `listening:   ${r.listening ? `${r.listening.host}:${r.listening.port}` : "no"}${r.listen_error ? ` (error: ${r.listen_error})` : ""}`,
+      `listening:   ${r.listening ? `${r.listening.host}:${r.listening.port}` : "no"}${r.listen_error ? ` (error: ${r.listen_error}${r.listen_retry_s != null ? `; trying again in ${r.listen_retry_s}s` : ""})` : ""}`,
       ...(r.config_errors ?? []).map((e) => `config error: ${e}`),
       ...(r.peers ?? []).length === 0 ? ["peers:       (none configured; add peers.json to the AgentLink data folder)"] : (r.peers ?? []).map((p) => `peer ${p.host.padEnd(16)} ${p.link.padEnd(5)} queued=${p.queued}${p.error ? `  last error: ${p.error}` : ""}`)
     ];
@@ -501,6 +568,9 @@ async function main() {
   agentctl pair ${r.code}
 `);
     console.log(`This PC is "${r.host}" at ${r.address}:${r.port}. The code works once and expires in ${Math.round(r.expires_s / 60)} min.`);
+    if (!values.address && (r.other_addresses?.length ?? 0) > 0) {
+      console.log(`This PC also has: ${r.other_addresses?.join(", ")}. If the other PC cannot reach ${r.address}, run again with --address <one of these>.`);
+    }
     if (process.platform === "win32") {
       const fw = spawnSync2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-NetFirewallRule -DisplayName 'AgentLink*' -ErrorAction SilentlyContinue | Measure-Object).Count"], { encoding: "utf8", timeout: 1e4 });
       if (fw.status === 0 && fw.stdout.trim() === "0") {

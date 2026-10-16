@@ -22,6 +22,13 @@ export interface WireMessage {
   state: MessageState
 }
 
+/** The last part of a path (either kind of separator), or null when there is none. */
+export function folderName(path: string | null): string | null {
+  if (path === null) return null
+  const parts = path.split(/[\\/]+/).filter(part => part !== '')
+  return parts.length > 0 ? parts[parts.length - 1] : null
+}
+
 function str(p: Params, name: string, opts: { required?: boolean; max?: number } = {}): string | undefined {
   const v = p[name]
   if (v === undefined || v === null) {
@@ -380,7 +387,7 @@ export class Core {
     this.deliver(a, { from: `agentlink@${this.host}`, kind: 'delivery_notice', summary: text.slice(0, LIMITS.maxSummaryChars), message: text, reply_to: null }, true)
   }
 
-  /** What this host tells its peers about its agents. */
+  /** What this host tells its peers about its agents. The working directory is reduced to its folder name: a full path shows user names and layout. */
   localDirectory(): RemoteAgent[] {
     return this.store
       .allAgents()
@@ -390,7 +397,7 @@ export class Core {
         ref: a.ref,
         kind: a.kind,
         status: this.statusOf(a),
-        cwd: a.cwd,
+        cwd: this.cfg.shareFullCwd ? a.cwd : folderName(a.cwd),
         unread: this.store.countState(a.agent, 'new'),
         last_seen: Math.floor(a.last_seen / 1000),
       }))

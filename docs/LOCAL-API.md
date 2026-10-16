@@ -165,6 +165,15 @@ hook과 MCP 서버는 모두 `CLAUDE_CODE_SESSION_ID` 환경변수를 받고, �
 - SDK ([SDK.md](SDK.md)): `src/sdk/agentlink.ts`의 `AgentLinkAgent`가 이 API 위에서 등록, 하트비트, push 수신, ack, busy/idle 보고, 재접속을 처리한다.
 - 데몬 종료: `shutdown`은 시작 도중에 와도 처리되며, 파이프를 가장 먼저 닫고, 늦어도 2초 안에 프로세스가 끝난다. (시작 도중 도착한 `shutdown` 요청을 무시하던 버그를 고쳤다.)
 
+### 7.9 0.3.0에서 바뀐 것
+- **수신 포트가 열리지 않아도 데몬이 죽지 않는다.** 이전 버전은 포트가 사용 중이거나 `listen.host` 주소가 없으면(IP가 바뀜, 부팅 직후 네트워크가 안 올라옴) 로그 없이 종료했다. 이제 오류를 `peers`의 `listen_error`에 담고, 포트가 필요한 동안 `AGENTLINK_LISTEN_RETRY_MS`(기본 15000)마다 다시 연다. `peers` 결과에 `listen_retry_s`(다음 시도까지 남은 초, 시도할 게 없으면 `null`)가 추가되었다. 같은 실패는 로그에 한 번만 남는다.
+- **일시적 거부는 메시지를 지우지 않는다.** 다른 PC가 `RATE_LIMITED`(속도 제한, inbox 가득)로 거부하면 outbox에 남겨 두고 `AGENTLINK_RETRY_BASE_MS`(2000)부터 두 배씩(최대 1분) 다시 보낸다. 호출자는 `queued_remote`를 받는다. `AGENTLINK_RETRY_MAX_ATTEMPTS`(8)번 거부되면 포기하고 보낸 에이전트에게 `delivery_notice`로 알린다. 다른 모든 오류 코드(모르는 코드 포함)는 이전처럼 최종이다.
+- **DB 스키마 버전**: `PRAGMA user_version`에 저장한다. 1은 이전까지의 스키마(버전 표시가 없는 기존 DB도 1로 열린다), 2는 outbox의 `attempts`, `next_try_ms` 열이다. 이후 변경은 `MIGRATIONS`에 쌓이고 새 데몬이 옛 DB를 열 때 제자리에서 올린다. **더 새로운 버전의 DB는 열지 않고** 이유를 `agentd.log`에 남긴다(그 데몬은 시작하지 않는다).
+- **다른 PC에는 작업 폴더의 이름만** 알린다(`list`의 원격 에이전트 `cwd`). 같은 PC의 에이전트는 전체 경로를 그대로 본다. `AGENTLINK_SHARE_FULL_CWD=1`이면 전체 경로를 알린다.
+- **로그**: `agentd.log`는 1 MiB에 닿으면 `agentd.log.1`로 바뀌고 새 파일이 시작된다(한 세대만).
+- **`pair`**: 알리는 주소는 사설 대역과 실제 어댑터를 우선해서 고르고, 다른 후보는 `pair_start` 결과의 `other_addresses`로 돌려준다. 하트비트와 재연결은 데몬을 띄우지 않는다(클라이언트 쪽, 도구 호출과 훅만 데몬을 띄운다).
+- 환경 변수: `AGENTLINK_LISTEN_RETRY_MS`(15000), `AGENTLINK_RETRY_BASE_MS`(2000), `AGENTLINK_RETRY_MAX_ATTEMPTS`(8), `AGENTLINK_SHARE_FULL_CWD`(끔). 유휴 감시기와 훅의 환경 변수는 [INSTALL.md](../INSTALL.md)에 있다.
+
 ## 6. 한도(초기값)
 
 | 항목 | 값 |

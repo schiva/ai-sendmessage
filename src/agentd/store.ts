@@ -51,22 +51,24 @@ export interface OutboxRow {
   sender_agent: string
   to_display: string
   created_ms: number
+  /** How often the other host has refused it for a passing reason. */
+  attempts: number
+  /** Not before this time (ms) is it sent again; 0 when there is nothing to wait for. */
+  next_try_ms: number
 }
+
+export type NewOutbox = Omit<OutboxRow, 'attempts' | 'next_try_ms'>
 
 export type NewMessage = Omit<MessageRow, 'seq' | 'state'>
 
-function plain<T>(row: unknown): T {
-  return { ...(row as object) } as T
-}
-
-export class Store {
-  private db: DatabaseSync
-
-  constructor(file: string) {
-    this.db = new DatabaseSync(file)
-    this.db.exec('PRAGMA journal_mode = WAL')
-    this.db.exec('PRAGMA busy_timeout = 3000')
-    this.db.exec(`
+/**
+ * Schema versions are kept in the database (PRAGMA user_version).
+ *   1  the tables below: everything written before versions existed has exactly this schema, so a database without a version is opened as 1.
+ *   n  MIGRATIONS[n - 2] has been applied on top of version n - 1.
+ * A change to the schema is a new entry at the end of MIGRATIONS (never an edit of BASE_SCHEMA or of an earlier entry), so that a database
+ * written by an older release is upgraded in place when the daemon of a newer release opens it.
+ */
+const BASE_SCHEMA = `
       CREATE TABLE IF NOT EXISTS agents (
         agent TEXT PRIMARY KEY,
         key TEXT NOT NULL UNIQUE,
@@ -119,7 +121,57 @@ export class Store {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (requester, target)
       );
-    `)
+    `
+
+const MIGRATIONS: string[] = [
+  // 2: a refused message that is worth sending again keeps count of its attempts and the time of the next one
+  'ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0; ALTER TABLE outbox ADD COLUMN next_try_ms INTEGER NOT NULL DEFAULT 0;',
+]
+
+export const SCHEMA_VERSION = 1 + MIGRATIONS.length
+
+function plain<T>(row: unknown): T {
+  return { ...(row as object) } as T
+}
+
+export class Store {
+  private db: DatabaseSync
+
+  constructor(file: string) {
+    this.db = new DatabaseSync(file)
+    this.db.exec('PRAGMA journal_mode = WAL')
+    this.db.exec('PRAGMA busy_timeout = 3000')
+    try {
+      this.migrate()
+    } catch (e) {
+      this.db.close() // a refused or failed database must not stay locked by this process
+      throw e
+    }
+  }
+
+  /** Brings the database to SCHEMA_VERSION. A database from a newer release is refused rather than guessed at. */
+  private migrate(): void {
+    const version = (): number => Number((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+    let v = version()
+    if (v > SCHEMA_VERSION) {
+      throw new Error(`the database has schema version ${v} but this daemon only knows up to ${SCHEMA_VERSION}: it was written by a newer AgentLink, update before using it`)
+    }
+    if (v === 0) {
+      this.db.exec(BASE_SCHEMA) // a new database, or one from before versions existed (the statements then change nothing)
+      this.db.exec('PRAGMA user_version = 1')
+      v = 1
+    }
+    for (; v < SCHEMA_VERSION; v++) {
+      this.db.exec('BEGIN')
+      try {
+        this.db.exec(MIGRATIONS[v - 1])
+        this.db.exec(`PRAGMA user_version = ${v + 1}`)
+        this.db.exec('COMMIT')
+      } catch (e) {
+        this.db.exec('ROLLBACK')
+        throw e
+      }
+    }
   }
 
   close(): void {
@@ -241,7 +293,7 @@ export class Store {
 
   // --- outbox (messages for other hosts that are not acknowledged yet) ----------
 
-  insertOutbox(r: OutboxRow): void {
+  insertOutbox(r: NewOutbox): void {
     this.db
       .prepare('INSERT OR REPLACE INTO outbox (id,peer,frame,sender_agent,to_display,created_ms) VALUES (?,?,?,?,?,?)')
       .run(r.id, r.peer, r.frame, r.sender_agent, r.to_display, r.created_ms)
@@ -250,6 +302,16 @@ export class Store {
   getOutbox(id: string): OutboxRow | undefined {
     const r = this.db.prepare('SELECT * FROM outbox WHERE id=?').get(id)
     return r ? plain<OutboxRow>(r) : undefined
+  }
+
+  /** Records another attempt: the message stays in the outbox and is not sent again before nextTryMs. */
+  retryOutbox(id: string, attempts: number, nextTryMs: number): void {
+    this.db.prepare('UPDATE outbox SET attempts=?, next_try_ms=? WHERE id=?').run(attempts, nextTryMs, id)
+  }
+
+  /** Messages that were refused for a passing reason and whose time to try again has come. */
+  outboxDue(peer: string, now: number): OutboxRow[] {
+    return this.db.prepare('SELECT * FROM outbox WHERE peer=? AND attempts>0 AND next_try_ms<=? ORDER BY created_ms, id').all(peer, now).map(r => plain<OutboxRow>(r))
   }
 
   outboxForPeer(peer: string): OutboxRow[] {

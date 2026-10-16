@@ -13,6 +13,13 @@ export interface Config {
   ackWaitMs: number
   outboxTtlMs: number
   directoryMs: number
+  /** How often a LAN port that could not be opened (address not up yet, port busy) is tried again. */
+  listenRetryMs: number
+  /** A message the other host refused for a passing reason (rate limit) is sent again: first after this long, then twice as long each time (at most a minute). */
+  retryBaseMs: number
+  retryMaxAttempts: number
+  /** Other hosts see only the folder name of an agent's working directory; with this on they see the whole path. */
+  shareFullCwd: boolean
 }
 
 function num(name: string, def: number): number {
@@ -52,5 +59,9 @@ export function loadConfig(): Config {
     ackWaitMs: num('AGENTLINK_ACK_WAIT_MS', 2_000),
     outboxTtlMs: num('AGENTLINK_OUTBOX_TTL_MS', 24 * 60 * 60 * 1000),
     directoryMs: num('AGENTLINK_DIRECTORY_MS', 3_000),
+    listenRetryMs: num('AGENTLINK_LISTEN_RETRY_MS', 15_000),
+    retryBaseMs: num('AGENTLINK_RETRY_BASE_MS', 2_000),
+    retryMaxAttempts: num('AGENTLINK_RETRY_MAX_ATTEMPTS', 8),
+    shareFullCwd: process.env.AGENTLINK_SHARE_FULL_CWD === '1',
   }
 }

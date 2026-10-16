@@ -59,14 +59,28 @@ export function proofMatches(given: unknown, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
-/** IPv4 addresses of this PC that other PCs of a LAN could reach, most likely first. */
-export function lanAddresses(): string[] {
-  const out: string[] = []
-  for (const addrs of Object.values(os.networkInterfaces())) {
+/** Adapters that exist on a PC without being the network the other PCs are on (WSL, Hyper-V, VPNs, virtual machines, tunnels). */
+const VIRTUAL_ADAPTER = /vethernet|wsl|hyper-v|virtualbox|vbox|vmware|docker|loopback|bluetooth|tailscale|zerotier|hamachi|vpn|\btap\b|\btun\b/i
+
+function isPrivateIpv4(ip: string): boolean {
+  const [a, b] = ip.split('.').map(Number)
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+}
+
+/**
+ * IPv4 addresses of this PC that other PCs of a LAN could reach, most likely first: private LAN ranges before other ranges, and
+ * the adapters of a real network before virtual ones. Within the same rank the order of the system is kept. `ifaces` is os.networkInterfaces().
+ */
+export function lanAddresses(ifaces: ReturnType<typeof os.networkInterfaces> = os.networkInterfaces()): string[] {
+  const found: Array<{ address: string; rank: number }> = []
+  for (const [name, addrs] of Object.entries(ifaces)) {
     for (const a of addrs ?? []) {
       if (a.family !== 'IPv4' || a.internal || a.address.startsWith('169.254.')) continue
-      out.push(a.address)
+      found.push({ address: a.address, rank: (isPrivateIpv4(a.address) ? 0 : 1) + (VIRTUAL_ADAPTER.test(name) ? 2 : 0) })
     }
   }
-  return out
+  return found
+    .map((f, i) => ({ ...f, i }))
+    .sort((x, y) => x.rank - y.rank || x.i - y.i)
+    .map(f => f.address)
 }

@@ -58,7 +58,18 @@ interface Dialer {
 
 interface Pending {
   resolve: () => void
+  /** The other host refused for a passing reason: the message stays queued and is sent again. */
+  queue: () => void
   reject: (e: Error) => void
+}
+
+/** Refusals that pass: the same message is accepted later. Every other error is final, and an unknown one is treated as final too. */
+const TRANSIENT_CODES = new Set<string>(['RATE_LIMITED'])
+/** After a retry was sent, wait this long for its answer before it counts as due again (the answer normally takes milliseconds). */
+const RETRY_ANSWER_WAIT_MS = 30_000
+
+export function retryDelayMs(attempts: number, baseMs: number): number {
+  return Math.min(baseMs * 2 ** Math.max(0, attempts - 1), 60_000)
 }
 
 type PairOutcome = 'waiting' | 'paired' | 'expired' | 'cancelled' | 'failed'
@@ -135,6 +146,10 @@ export class PeerManager implements RemoteGateway {
   private listenError: string | null = null
   private directoryTimer: NodeJS.Timeout | null = null
   private pairing: PairState | null = null
+  private listenRetry: NodeJS.Timeout | null = null
+  private listenRetryAt: number | null = null
+  private lastListenFailure = ''
+  private stopped = false
 
   constructor(opts: { core: Core; store: Store; cfg: Config; home: string; tls: TlsMaterial; selfHost: string; log: (line: string) => void }) {
     this.core = opts.core
@@ -190,6 +205,10 @@ export class PeerManager implements RemoteGateway {
           clearTimeout(timer)
           resolve('stored')
         },
+        queue: () => {
+          clearTimeout(timer)
+          resolve('queued_remote')
+        },
         reject: e => {
           clearTimeout(timer)
           reject(e)
@@ -213,6 +232,7 @@ export class PeerManager implements RemoteGateway {
       fingerprint: displayFingerprint(this.tls.fingerprint),
       listening: this.listening,
       listen_error: this.listenError,
+      listen_retry_s: this.listenRetryAt === null ? null : Math.max(0, Math.ceil((this.listenRetryAt - Date.now()) / 1000)),
       config_errors: this.config.errors,
       peers: this.hosts(),
     }
@@ -242,6 +262,7 @@ export class PeerManager implements RemoteGateway {
       await this.stopListener()
       if (want) await this.startListener(want)
     }
+    this.scheduleListenRetry()
 
     if (next.peers.length > 0 && !this.directoryTimer) {
       this.directoryTimer = setInterval(() => this.broadcastDirectory(), this.cfg.directoryMs)
@@ -255,6 +276,10 @@ export class PeerManager implements RemoteGateway {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true
+    if (this.listenRetry) clearTimeout(this.listenRetry)
+    this.listenRetry = null
+    this.listenRetryAt = null
     if (this.pairing) clearTimeout(this.pairing.timer)
     if (this.directoryTimer) clearInterval(this.directoryTimer)
     this.directoryTimer = null
@@ -263,8 +288,9 @@ export class PeerManager implements RemoteGateway {
     await this.stopListener()
   }
 
-  /** Called periodically by the daemon: expires undeliverable messages. */
+  /** Called periodically by the daemon: sends refused messages again when their time has come, and expires undeliverable ones. */
   sweep(): void {
+    this.retryDue()
     const expired = this.store.outboxExpired(Date.now() - this.cfg.outboxTtlMs)
     for (const row of expired) {
       this.store.deleteOutbox(row.id)
@@ -303,7 +329,8 @@ export class PeerManager implements RemoteGateway {
     timer.unref()
     this.pairing = { secret, address, port, expiresAt: Date.now() + ttlS * 1000, failures: 0, state: 'waiting', host: null, detail: null, timer }
     this.log(`pairing opened on ${address}:${port} for ${ttlS}s`)
-    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost }
+    const others = lanAddresses().filter(a => a !== address)
+    return { code: encodeCode({ address, port, fingerprint: this.tls.fingerprint, secret }), address, port, expires_s: ttlS, host: this.selfHost, other_addresses: others }
   }
 
   pairStatus(): Record<string, unknown> {
@@ -432,9 +459,14 @@ export class PeerManager implements RemoteGateway {
       const server = https.createServer({ key: this.tls.key, cert: this.tls.cert, minVersion: 'TLSv1.2' })
       const wss = new WebSocketServer({ server, maxPayload: MAX_FRAME })
       wss.on('connection', ws => this.bind(ws, 'peer', null))
+      // ws re-emits the errors of the server it is attached to. Without a listener that is an uncaught exception, and a busy port or a
+      // missing address would kill the daemon before the handler below runs. The server's own handler deals with it.
+      wss.on('error', () => {})
       server.once('error', e => {
         this.listenError = `${(e as NodeJS.ErrnoException).code ?? 'error'}: ${e.message}`
-        this.log(`listener ${l.host}:${l.port} failed: ${this.listenError}`)
+        const failure = `listener ${l.host}:${l.port} failed: ${this.listenError}`
+        if (failure !== this.lastListenFailure) this.log(failure) // a retry that fails the same way is not logged again
+        this.lastListenFailure = failure
         wss.close()
         resolve()
       })
@@ -443,10 +475,31 @@ export class PeerManager implements RemoteGateway {
         this.wss = wss
         this.listening = { host: l.host, port: (server.address() as { port: number }).port }
         this.listenError = null
+        this.lastListenFailure = ''
         this.log(`listening for peers on ${l.host}:${this.listening.port}`)
         resolve()
       })
     })
+  }
+
+  /**
+   * peers.json asks for a LAN port but it is not open (the address is not up yet after a boot or a network change, or the port is busy):
+   * try again every listenRetryMs until it opens, instead of staying closed until someone reloads or restarts.
+   */
+  private scheduleListenRetry(): void {
+    if (this.listenRetry) clearTimeout(this.listenRetry)
+    this.listenRetry = null
+    this.listenRetryAt = null
+    if (this.stopped || !this.config.listen || this.listening) return
+    this.listenRetryAt = Date.now() + this.cfg.listenRetryMs
+    this.listenRetry = setTimeout(() => {
+      this.listenRetry = null
+      this.listenRetryAt = null
+      const want = this.config.listen
+      if (this.stopped || !want || this.listening) return
+      void this.startListener(want).then(() => this.scheduleListenRetry())
+    }, this.cfg.listenRetryMs)
+    this.listenRetry.unref()
   }
 
   private stopListener(): Promise<void> {
@@ -668,7 +721,9 @@ export class PeerManager implements RemoteGateway {
   }
 
   private flush(link: Link): void {
+    const now = Date.now()
     for (const row of this.store.outboxForPeer(link.host)) {
+      if (row.next_try_ms > now) continue // refused a moment ago: its own retry time decides
       try {
         link.ws.send(row.frame)
       } catch {
@@ -699,19 +754,45 @@ export class PeerManager implements RemoteGateway {
     }
   }
 
+  /** Sends the refused messages whose retry time has come over the links that are up. */
+  private retryDue(): void {
+    const now = Date.now()
+    for (const link of this.links.values()) {
+      for (const row of this.store.outboxDue(link.host, now)) {
+        try {
+          link.ws.send(row.frame)
+        } catch {
+          break
+        }
+        // If the answer never comes (the link broke), try again after a while; an answer sets the real time or removes the message.
+        this.store.retryOutbox(row.id, row.attempts, now + RETRY_ANSWER_WAIT_MS)
+      }
+    }
+  }
+
   private onAck(host: string, f: Record<string, unknown>): void {
     const id = typeof f.id === 'string' ? f.id : ''
     const row = this.store.getOutbox(id)
     if (!row || row.peer !== host) return
-    this.store.deleteOutbox(id)
     const waiter = this.pending.get(id)
     this.pending.delete(id)
     if (f.status === 'stored') {
+      this.store.deleteOutbox(id)
       waiter?.resolve()
       return
     }
     const code = (typeof f.code === 'string' && KNOWN_CODES.has(f.code) ? f.code : 'INTERNAL') as ErrorCode
-    const message = typeof f.message === 'string' ? f.message.slice(0, 300) : 'delivery failed'
+    let message = typeof f.message === 'string' ? f.message.slice(0, 300) : 'delivery failed'
+    if (TRANSIENT_CODES.has(code)) {
+      const attempts = row.attempts + 1
+      if (attempts < this.cfg.retryMaxAttempts) {
+        this.store.retryOutbox(id, attempts, Date.now() + retryDelayMs(attempts, this.cfg.retryBaseMs))
+        waiter?.queue()
+        return
+      }
+      message = `${message} (gave up after ${attempts} attempts)`
+    }
+    this.store.deleteOutbox(id)
     if (waiter) waiter.reject(new ApiError(code, `${message} (reported by ${host})`))
     else this.core.deliverNotice(row.sender_agent, `Message to ${row.to_display} could not be delivered: ${code}: ${message}`)
   }

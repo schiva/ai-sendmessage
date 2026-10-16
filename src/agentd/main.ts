@@ -8,6 +8,7 @@ import { PeerManager } from './peers.ts'
 import { loadPeersConfig } from './peers-config.ts'
 import { Server } from './server.ts'
 import { Acl, parsePattern } from './acl.ts'
+import { appendLog } from './applog.ts'
 import { ApiError } from './protocol.ts'
 import { Store } from './store.ts'
 import { ensureTls } from './tls.ts'
@@ -17,11 +18,7 @@ fs.mkdirSync(home, { recursive: true })
 const logFile = path.join(home, 'agentd.log')
 
 function log(line: string): void {
-  try {
-    fs.appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`)
-  } catch {
-    // logging must never take the daemon down
-  }
+  appendLog(logFile, `${new Date().toISOString()} ${line}`) // never throws, and keeps the file from growing without bound
 }
 
 function ensureToken(file: string): string {
@@ -39,7 +36,14 @@ const token = ensureToken(path.join(home, 'token'))
 const cfg = loadConfig()
 const server = await (async () => {
   // Bind the pipe first: whoever wins the pipe is the single instance.
-  const store = new Store(path.join(home, 'agentd.db'))
+  let store: Store
+  try {
+    store = new Store(path.join(home, 'agentd.db'))
+  } catch (e) {
+    // For example a database written by a newer release. Say why in the log: the client only sees that the daemon did not start.
+    log(`cannot open the database: ${e instanceof Error ? e.message : String(e)}`)
+    process.exit(1)
+  }
   const host = hostName()
   const core = new Core(store, host, cfg)
   // The LAN layer starts after the pipe is bound, because creating the TLS identity can take a moment.

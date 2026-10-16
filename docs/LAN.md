@@ -21,10 +21,30 @@
 - 보낸 메시지는 먼저 송신 PC 디스크의 outbox에 저장되고, 상대가 ack할 때까지 재전송된다(at-least-once). 수신 PC는 메시지 `id`로 중복을 걸러 낸다.
 - `send`는 상대가 2초 안에 ack하면 `stored`, 링크가 없거나 늦으면 `queued_remote`를 돌려준다. 상대가 거부하면(없는 에이전트, 이름 모호 등) 그 오류가 그대로 온다. 큐에 들어간 뒤 늦게 거부되면 보낸 에이전트의 inbox에 `delivery_notice` 메시지가 온다.
 - 큐 보관 기간은 24시간이다. 넘으면 버리고 알림을 남긴다.
+- 상대가 속도 제한이나 가득 찬 inbox(`RATE_LIMITED`)로 잠깐 거부한 메시지는 지워지지 않는다. 2초부터 두 배씩(최대 1분) 다시 보내고, 호출자는 `queued_remote`를 받는다. 8번 거부되면 포기하고 보낸 에이전트에게 알린다. 다른 오류(없는 에이전트, 이름 모호, 너무 큼 등)는 바로 최종이다.
+- 수신 포트를 열지 못하면(포트가 사용 중, `listen.host`의 IP가 없음) 데몬은 계속 뜬 채로 15초마다 다시 연다. `agentctl peers`의 `listening` 줄에 오류와 "trying again in Ns"가 보인다. DHCP로 IP가 바뀌었다면 `peers.json`의 `listen.host`를 새 IP로 고치고 `peers reload`한다.
+- 다른 PC에는 에이전트의 작업 폴더 전체 경로가 아니라 폴더 이름만 알린다(같은 PC에서는 전체 경로). 전체 경로를 알리려면 환경 변수 `AGENTLINK_SHARE_FULL_CWD=1`.
 
 ## 2. 가장 쉬운 방법: `agentctl pair`
 
-두 PC에 AgentLink를 설치한 뒤, 코드 한 줄이면 된다. 지문과 토큰을 손으로 옮기지 않는다.
+두 PC에 AgentLink를 설치한 뒤, 코드 한 줄이면 된다. 지문과 토큰을 손으로 옮기지 않는다. 단, 아래 방화벽 규칙은 직접 만들어야 한다.
+
+### 방화벽 규칙 (수신하는 PC에 필수)
+
+Windows 방화벽은 들어오는 연결을 기본으로 막는다. 상대 PC가 접속해 오는 포트(기본 TCP 7420)를 여는 PC에는 허용 규칙이 있어야 한다. 규칙이 없으면 상대의 접속이 막혀 연결되지 않는다. 이 프로그램은 방화벽 설정을 대신 바꾸지 않는다.
+
+- **어느 PC에 필요한가:** `agentctl pair`에서는 코드를 만든 PC, 수동 설정에서는 `listen`으로 포트를 여는 모든 PC. 접속하는 쪽(`dial: true`)은 나가는 연결이라 규칙이 필요 없다.
+- **만들기** (관리자 PowerShell, 포트마다 한 번):
+  ```
+  New-NetFirewallRule -DisplayName "AgentLink" -Direction Inbound -Protocol TCP -LocalPort 7420 -RemoteAddress <상대 PC의 IP> -Action Allow
+  ```
+  상대가 여러 대이거나 IP가 바뀌면 `-RemoteAddress LocalSubnet`(같은 서브넷 전체)을 쓴다. `--port`나 `listen.port`로 7420이 아닌 포트를 쓰면 그 포트로 규칙을 만든다.
+- **확인하기:** `Get-NetFirewallRule -DisplayName "AgentLink*" | Get-NetFirewallPortFilter`
+- **지우기:** `Remove-NetFirewallRule -DisplayName "AgentLink"`
+- `agentctl pair`는 이름이 `AgentLink`로 시작하는 규칙이 하나도 없으면 위 명령(`LocalSubnet` 형태)을 출력한다. 규칙의 존재만 보고, 포트와 허용 주소가 맞는지는 검사하지 않는다.
+- 상대 IP 하나만 허용한 규칙으로 실제 두 PC 검증을 했다. 규칙이 없을 때의 정확한 증상은 실제 PC에서 확인하지 않았다(예상: 시간 초과나 `ECONNREFUSED`, 문제 해결 표 참고).
+
+### 순서
 
 1. PC-A에서 `agentctl pair`를 실행한다. 코드(`AL1-…`)와 이 PC의 주소가 출력되고, 상대를 기다린다(기본 10분).
 2. PC-B에서 `agentctl pair AL1-…`를 실행한다. 몇 초 안에 `Connected to <PC-A>`가 나온다.
@@ -32,7 +52,7 @@
 
 - 코드에는 PC-A의 주소, 인증서 지문, 1회용 비밀이 들어 있다. PC-B는 코드의 지문으로 PC-A의 인증서를 고정하고(S-02), 비밀을 아는 것을 증명한 뒤에야 등록된다. 링크 토큰은 이 비밀에서 파생되며 비밀 자체는 저장되지 않는다.
 - 코드는 한 번만 쓸 수 있다. 시간이 지나거나, 틀린 시도가 5번 쌓이거나, `Ctrl+C`로 취소하면 닫힌다. 그동안만 PC-A의 LAN 포트가 열려 있다.
-- 접속은 PC-B가 PC-A로 건다(PC-A 쪽 항목은 `dial: false`). 그래서 PC-A의 방화벽만 열면 된다. `agentctl pair`가 규칙이 없으면 관리자 PowerShell 명령을 보여 준다. 규칙은 같은 서브넷(`-RemoteAddress LocalSubnet`)만 허용한다.
+- 접속은 PC-B가 PC-A로 건다(PC-A 쪽 항목은 `dial: false`). 그래서 PC-A의 방화벽만 열면 된다(위 "방화벽 규칙").
 - PC에 IP가 여러 개이면 `--address <IP>`로 상대가 쓸 주소를 고른다. `--port`, `--ttl`도 있다.
 - 세 대 이상은 같은 방식으로 한 쌍씩 맺는다(`peers.json`에 항목이 추가된다).
 - `peers.json`이 손상된 JSON이면 건드리지 않고 오류를 낸다. 고치거나 지운 뒤 다시 한다.
@@ -65,7 +85,7 @@
    }
    ```
    PC-B에는 `listen.host`를 자기 IP로, `name`을 `pc-a`로, `address`를 PC-A의 IP로, `fingerprint`를 PC-A의 값으로 바꿔 만든다.
-5. 방화벽에서 수신 포트를 상대 IP에게만 연다(관리자 PowerShell). PC-A 예시:
+5. 방화벽에서 수신 포트를 상대 IP에게만 연다(2절의 "방화벽 규칙"과 같다, 관리자 PowerShell). PC-A 예시:
    ```
    New-NetFirewallRule -DisplayName "AgentLink" -Direction Inbound -Protocol TCP -LocalPort 7420 -RemoteAddress 192.168.0.12 -Action Allow
    ```
@@ -98,6 +118,7 @@
 | `down`, 오류가 `ECONNREFUSED`/`ETIMEDOUT` | 상대 데몬이 안 떠 있거나, 상대 `listen.host`가 `127.0.0.1`이거나, 방화벽이 막고 있다. |
 | `down`, 오류가 `peer refused the connection: UNAUTHORIZED` | 토큰이 다르거나, 상대의 `peers.json`에 이 PC의 호스트 이름이 없다(호스트 이름은 대소문자만 무시하고 정확히 같아야 한다). |
 | 데몬이 안 뜬 PC로 보낸 메시지 | `queued_remote`로 보관되고 상대가 돌아오면 전달된다. 상대 PC는 에이전트가 한 번은 떠서 데몬이 기동돼야 한다(D-08). |
+| `agentctl peers`의 `listening: no (error: EADDRINUSE …; trying again in Ns)` 또는 `EADDRNOTAVAIL` | 포트를 다른 프로그램이 쓰고 있거나(`EADDRINUSE`) `listen.host`의 IP가 이 PC에 없다(`EADDRNOTAVAIL`, IP가 바뀜). 데몬은 죽지 않고 다시 시도한다. 원인을 없애거나 `peers.json`을 고치고 `peers reload`한다. |
 | `UNKNOWN_HOST: host ... is not in peers.json` | 주소의 호스트 이름이 `peers[].name`과 다르다. `agentctl peers`로 목록을 확인한다. |
 
 ## 6. 신뢰 경계와 한계

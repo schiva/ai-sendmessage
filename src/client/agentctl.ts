@@ -135,6 +135,7 @@ async function main(): Promise<void> {
       fingerprint?: string
       listening?: { host: string; port: number } | null
       listen_error?: string | null
+      listen_retry_s?: number | null
       config_errors?: string[]
       peers?: Array<{ host: string; link: string; since: number | null; queued: number; error: string | null }>
       starting?: boolean
@@ -142,7 +143,7 @@ async function main(): Promise<void> {
     const lines = [
       `host:        ${r.host ?? client.hello.host}`,
       `fingerprint: ${r.fingerprint ?? '(starting)'}`,
-      `listening:   ${r.listening ? `${r.listening.host}:${r.listening.port}` : 'no'}${r.listen_error ? ` (error: ${r.listen_error})` : ''}`,
+      `listening:   ${r.listening ? `${r.listening.host}:${r.listening.port}` : 'no'}${r.listen_error ? ` (error: ${r.listen_error}${r.listen_retry_s != null ? `; trying again in ${r.listen_retry_s}s` : ''})` : ''}`,
       ...(r.config_errors ?? []).map(e => `config error: ${e}`),
       ...((r.peers ?? []).length === 0 ? ['peers:       (none configured; add peers.json to the AgentLink data folder)'] : (r.peers ?? []).map(p => `peer ${p.host.padEnd(16)} ${p.link.padEnd(5)} queued=${p.queued}${p.error ? `  last error: ${p.error}` : ''}`)),
     ]
@@ -172,9 +173,12 @@ async function main(): Promise<void> {
       address: values.address,
       port: values.port ? Number(values.port) : undefined,
       ttl_s: values.ttl ? Number(values.ttl) : undefined,
-    })) as { code: string; address: string; port: number; expires_s: number; host: string }
+    })) as { code: string; address: string; port: number; expires_s: number; host: string; other_addresses?: string[] }
     console.log(`On the other PC run:\n\n  agentctl pair ${r.code}\n`)
     console.log(`This PC is "${r.host}" at ${r.address}:${r.port}. The code works once and expires in ${Math.round(r.expires_s / 60)} min.`)
+    if (!values.address && (r.other_addresses?.length ?? 0) > 0) {
+      console.log(`This PC also has: ${r.other_addresses?.join(', ')}. If the other PC cannot reach ${r.address}, run again with --address <one of these>.`)
+    }
     if (process.platform === 'win32') {
       const fw = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "(Get-NetFirewallRule -DisplayName 'AgentLink*' -ErrorAction SilentlyContinue | Measure-Object).Count"], { encoding: 'utf8', timeout: 10_000 })
       if (fw.status === 0 && fw.stdout.trim() === '0') {
