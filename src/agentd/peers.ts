@@ -45,6 +45,9 @@ interface Link {
   alive: boolean
   agents: RemoteAgent[]
   pingTimer: NodeJS.Timeout
+  /** What the last list of agents sent to this peer looked like (without last_seen), and when it was sent. */
+  lastDirectory: string
+  lastDirectoryAt: number
 }
 
 interface Dialer {
@@ -150,6 +153,7 @@ export class PeerManager implements RemoteGateway {
   private listenRetryAt: number | null = null
   private lastListenFailure = ''
   private stopped = false
+  private unauthenticated: Array<{ ws: WebSocket; ip: string }> = []
 
   constructor(opts: { core: Core; store: Store; cfg: Config; home: string; tls: TlsMaterial; selfHost: string; log: (line: string) => void }) {
     this.core = opts.core
@@ -477,7 +481,10 @@ export class PeerManager implements RemoteGateway {
     return new Promise(resolve => {
       const server = https.createServer({ key: this.tls.key, cert: this.tls.cert, minVersion: 'TLSv1.2' })
       const wss = new WebSocketServer({ server, maxPayload: MAX_FRAME })
-      wss.on('connection', ws => this.bind(ws, 'peer', null))
+      wss.on('connection', (ws, req) => {
+        this.admitUnauthenticated(ws, req.socket.remoteAddress ?? '')
+        this.bind(ws, 'peer', null, () => this.forgetUnauthenticated(ws))
+      })
       // ws re-emits the errors of the server it is attached to. Without a listener that is an uncaught exception, and a busy port or a
       // missing address would kill the daemon before the handler below runs. The server's own handler deals with it.
       wss.on('error', () => {})
@@ -519,6 +526,27 @@ export class PeerManager implements RemoteGateway {
       void this.startListener(want).then(() => this.scheduleListenRetry())
     }, this.cfg.listenRetryMs)
     this.listenRetry.unref()
+  }
+
+  /**
+   * Connections that have not said who they are yet are limited, so that idle sockets cannot use up the daemon: when the limit for
+   * one address (or the overall limit) is reached, the oldest of them is closed to make room. A peer that connects now is never turned
+   * away, and whoever opens many sockets only closes its own.
+   */
+  private admitUnauthenticated(ws: WebSocket, ip: string): void {
+    const drop = (entry: { ws: WebSocket }) => {
+      this.unauthenticated = this.unauthenticated.filter(e => e !== entry)
+      entry.ws.terminate()
+    }
+    const sameIp = this.unauthenticated.filter(e => e.ip === ip)
+    if (sameIp.length >= this.cfg.maxPreAuthPerIp) drop(sameIp[0])
+    if (this.unauthenticated.length >= this.cfg.maxPreAuth) drop(this.unauthenticated[0])
+    this.unauthenticated.push({ ws, ip })
+    ws.once('close', () => this.forgetUnauthenticated(ws))
+  }
+
+  private forgetUnauthenticated(ws: WebSocket): void {
+    this.unauthenticated = this.unauthenticated.filter(e => e.ws !== ws)
   }
 
   private stopListener(): Promise<void> {
@@ -694,6 +722,8 @@ export class PeerManager implements RemoteGateway {
       since: Date.now(),
       alive: true,
       agents: [],
+      lastDirectory: '',
+      lastDirectoryAt: 0,
       pingTimer: setInterval(() => {
         if (!link.alive) {
           ws.terminate()
@@ -727,9 +757,17 @@ export class PeerManager implements RemoteGateway {
 
   // --- frames ------------------------------------------------------------------------------------------
 
+  /** Sends the list of local agents unless this peer already has it: it goes out when it changed and at least every directoryKeepaliveMs. */
   private sendDirectory(link: Link): void {
+    const agents = this.core.localDirectory()
+    // last_seen moves whenever an agent is touched (a watcher does it every few seconds); it must not make every tick a change.
+    const signature = JSON.stringify(agents.map(a => ({ ...a, last_seen: 0 })))
+    const now = Date.now()
+    if (signature === link.lastDirectory && now - link.lastDirectoryAt < this.cfg.directoryKeepaliveMs) return
+    link.lastDirectory = signature
+    link.lastDirectoryAt = now
     try {
-      link.ws.send(JSON.stringify({ t: 'agents', agents: this.core.localDirectory() }))
+      link.ws.send(JSON.stringify({ t: 'agents', agents }))
     } catch {
       // the close handler cleans up
     }

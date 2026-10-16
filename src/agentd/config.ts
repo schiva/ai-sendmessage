@@ -25,6 +25,11 @@ export interface Config {
   /** Messages waiting in the outbox for one host that cannot be reached: at most this many, and at most this many bytes. */
   outboxMaxMessages: number
   outboxMaxBytes: number
+  /** The list of agents is sent to a peer when it changed, and anyway after this long. */
+  directoryKeepaliveMs: number
+  /** Connections that have not said who they are yet: at most this many in all, and at most this many from one address. */
+  maxPreAuth: number
+  maxPreAuthPerIp: number
 }
 
 function num(name: string, def: number): number {
@@ -71,5 +76,8 @@ export function loadConfig(): Config {
     pairMinTtlS: num('AGENTLINK_PAIR_MIN_TTL_S', 10),
     outboxMaxMessages: num('AGENTLINK_OUTBOX_MAX', 500),
     outboxMaxBytes: num('AGENTLINK_OUTBOX_MAX_BYTES', 16 * 1024 * 1024),
+    directoryKeepaliveMs: num('AGENTLINK_DIRECTORY_KEEPALIVE_MS', 30_000),
+    maxPreAuth: num('AGENTLINK_MAX_PREAUTH', 32),
+    maxPreAuthPerIp: num('AGENTLINK_MAX_PREAUTH_PER_IP', 4),
   }
 }

@@ -110,3 +110,109 @@ test('the byte limit counts too', async () => {
     await stop(rx)
   }
 })
+
+// --- R4 and R5: traffic of the peer link ---------------------------------------------------------------
+
+import { WebSocket } from 'ws'
+import { TOKEN, rawPeer, writePeers } from './lan-harness.ts'
+
+const rawPeerConfig = (n: { port: number }) => ({ listen: { host: '127.0.0.1', port: n.port }, peers: [{ name: 'raw-host', token: TOKEN, dial: false }] })
+const agentsFrames = (frames: Array<Record<string, unknown>>) => frames.filter(f => f.t === 'agents')
+
+test('the list of agents is sent to a peer when it changes and now and then, not at every tick', async () => {
+  const n = await makeNode('pc-z1', { AGENTLINK_DIRECTORY_MS: '100', AGENTLINK_DIRECTORY_KEEPALIVE_MS: '1500' })
+  try {
+    await start(n)
+    writePeers(n, rawPeerConfig(n))
+    await req(n, 'reload_peers')
+    const steady = await reg(n, 'steady')
+    const peer = await rawPeer(n, 'raw-host', TOKEN)
+    await peer.waitFor(f => f.t === 'welcome')
+    await peer.waitFor(f => f.t === 'agents')
+    const base = agentsFrames(peer.frames).length
+
+    // For 2.4 s an agent is touched every 150 ms (its last_seen moves) while nothing else changes: one keepalive at most.
+    const end = Date.now() + 2400
+    while (Date.now() < end) {
+      await req(n, 'heartbeat', { agent: steady.agent })
+      await sleep(150)
+    }
+    const quiet = agentsFrames(peer.frames).length - base
+    assert.ok(quiet <= 2, `at 100 ms ticks that would be about 24 frames; got ${quiet}`)
+
+    await reg(n, 'newcomer') // a real change goes out at the next tick
+    await peer.waitFor(f => f.t === 'agents' && JSON.stringify(f.agents).includes('newcomer'), 1200)
+    peer.ws.close()
+  } finally {
+    await stop(n)
+  }
+})
+
+async function openIdle(port: number, count: number): Promise<WebSocket[]> {
+  const sockets: WebSocket[] = []
+  for (let i = 0; i < count; i++) {
+    const ws = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false })
+    ws.on('error', () => {})
+    await new Promise<void>(resolve => {
+      ws.once('open', () => resolve())
+      ws.once('error', () => resolve())
+    })
+    sockets.push(ws)
+  }
+  return sockets
+}
+
+test('idle connections that never say who they are are limited per address, the oldest goes first, and a real peer still gets in', async () => {
+  const n = await makeNode('pc-z2', { AGENTLINK_MAX_PREAUTH_PER_IP: '3' })
+  let idle: WebSocket[] = []
+  try {
+    await start(n)
+    writePeers(n, rawPeerConfig(n))
+    await req(n, 'reload_peers')
+    idle = await openIdle(n.port, 8)
+    await sleep(400)
+    const open = idle.filter(s => s.readyState === WebSocket.OPEN)
+    assert.equal(open.length, 3, 'only the three newest idle connections are still open')
+    assert.deepEqual(open, idle.slice(-3), 'and they are the last three that were opened')
+
+    const peer = await rawPeer(n, 'raw-host', TOKEN) // arrives while the address is at its limit
+    await peer.waitFor(f => f.t === 'welcome', 3000)
+    peer.ws.close()
+  } finally {
+    for (const s of idle) s.terminate()
+    await stop(n)
+  }
+})
+
+test('the overall limit of idle connections holds too', async () => {
+  const n = await makeNode('pc-z3', { AGENTLINK_MAX_PREAUTH: '4', AGENTLINK_MAX_PREAUTH_PER_IP: '100' })
+  let idle: WebSocket[] = []
+  try {
+    await start(n)
+    writePeers(n, rawPeerConfig(n))
+    await req(n, 'reload_peers')
+    idle = await openIdle(n.port, 7)
+    await sleep(400)
+    assert.equal(idle.filter(s => s.readyState === WebSocket.OPEN).length, 4)
+  } finally {
+    for (const s of idle) s.terminate()
+    await stop(n)
+  }
+})
+
+test('a peer that reconnects at once (as the dialer does after a drop) is not blocked by its own earlier attempts', async () => {
+  const n = await makeNode('pc-z4', { AGENTLINK_MAX_PREAUTH_PER_IP: '2' })
+  try {
+    await start(n)
+    writePeers(n, rawPeerConfig(n))
+    await req(n, 'reload_peers')
+    for (let i = 0; i < 6; i++) {
+      const peer = await rawPeer(n, 'raw-host', TOKEN)
+      await peer.waitFor(f => f.t === 'welcome', 3000)
+      peer.ws.close()
+      await sleep(30)
+    }
+  } finally {
+    await stop(n)
+  }
+})
