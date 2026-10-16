@@ -7,12 +7,13 @@ import { homeDir } from '../agentd/config.ts'
 import { aclStarter, writeAclStarter } from '../agentd/acl-init.ts'
 import { versionMismatchNote } from '../version.ts'
 import { findSessionPid, sessionAliveCheck, stopWatchers, waitForWake, wakeCommand, wakeOptionsFromEnv } from './wake.ts'
+import { askAtTerminal, firewallNote, parseJoinCommand, runJoinCommand } from './join-cli.ts'
 
 const USAGE = `agentctl - AgentLink command line client
 
 Usage: agentctl [options] <command> [args]
 
-Identity (for every command except ping, stop, peers, pair and acl):
+Identity (for every command except ping, stop, peers, pair, join and acl):
   --as <name>        act as the agent <name> (registered under the key "cli:<name>")
   --agent <id>       act as an already registered agent id (or set AGENTLINK_AGENT)
 
@@ -38,6 +39,16 @@ Commands:
   peers [reload]     show LAN links, the certificate fingerprint of this host, and re-read peers.json
   pair               connect two PCs: prints a one-time code (valid 10 minutes), then waits for the other PC
   pair <code>        on the other PC: join with that code; both PCs then know each other
+  pair --open [--ttl <seconds>] [--count <1-8>] [--address <IP>] [--port <port>] [--until-request]
+                     open a window for new PCs to ask to join (no code to copy): prints the command to run on the new PC,
+                     then reports each request. Each one has to be approved with "pair approve". --until-request is for an
+                     agent: it prints one line (no number) when the first request arrives and ends, the window stays open.
+  pair --close       close the join window and drop the requests that are waiting
+  pair pending [--json]  list the requests that wait for approval (never shows a confirmation number)
+  pair approve [<request id>]  approve a request. Run it yourself in a terminal window: it refuses to run without one, and
+                     asks for the 6-digit number shown on the new PC (the number is never taken from the command line)
+  join <IPv4>[:<port>] [--timeout <seconds>]  on the new PC: ask a PC that ran "pair --open" to let this PC in. Prints a
+                     6-digit number; the person at that PC approves with it
   stop               shut agentd down
 
 Options:
@@ -52,7 +63,10 @@ Options:
   --peek             inbox without changing message state
   --address <ip>     for pair: the IP of this PC that the other PC should use (default: detected)
   --port <n>         for pair: LAN port (default 7420)
-  --ttl <seconds>    for pair: how long the code is valid (default 600)
+  --ttl <seconds>    for pair: how long the code (or, with --open, the window) is valid (default 600)
+  --count <n>        for pair --open: how many PCs the window admits before it closes (default 1, at most 8)
+  --until-request    for pair --open: end when the first request arrives (the window stays open)
+  --timeout <seconds>  for join: how long to wait for approval (default 300)
 `
 
 const { values, positionals } = parseArgs({
@@ -76,6 +90,11 @@ const { values, positionals } = parseArgs({
     address: { type: 'string' },
     port: { type: 'string' },
     ttl: { type: 'string' },
+    open: { type: 'boolean' },
+    close: { type: 'boolean' },
+    count: { type: 'string' },
+    'until-request': { type: 'boolean' },
+    timeout: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
 })
@@ -108,9 +127,38 @@ async function main(): Promise<void> {
     out(reports, reports.length === 0 ? 'no idle watcher found' : reports.map(r => `${r.agent}: ${describe(r)}`).join('\n'))
     process.exit(reports.some(r => r.how === 'refused') ? 1 : 0)
   }
+  // `pair --open|--close|pending|approve` and `join`: the command line is checked before a daemon is contacted or started, so a
+  // refused `pair approve` (no terminal) leaves everything as it was.
+  const joinParsed = parseJoinCommand(
+    command,
+    rest,
+    { open: values.open, close: values.close, json: values.json, untilRequest: values['until-request'], ttl: values.ttl, count: values.count, address: values.address, port: values.port, timeout: values.timeout },
+    process.stdin.isTTY === true,
+  )
+  if (joinParsed && 'error' in joinParsed) fail(joinParsed.code, joinParsed.error)
+
   const client = await Client.connect({ autostart: command !== 'stop' })
   const mismatch = command === 'stop' ? null : versionMismatchNote(client.hello.server_version)
   if (mismatch) console.error(`warning: ${mismatch}`)
+
+  if (joinParsed && 'command' in joinParsed) {
+    const code = await runJoinCommand(joinParsed.command, {
+      request: (method, params) => client.request(method, params),
+      out: line => console.log(line),
+      err: line => console.error(line),
+      sleep: ms => new Promise<void>(r => setTimeout(r, ms)),
+      now: () => Date.now(),
+      onInterrupt: fn => {
+        process.on('SIGINT', fn)
+        return () => void process.off('SIGINT', fn)
+      },
+      isTerminal: process.stdin.isTTY === true,
+      ask: askAtTerminal,
+      firewallNote,
+    })
+    client.close()
+    process.exit(code)
+  }
 
   if (command === 'ping') {
     out(client.hello, `agentd ${client.hello.server_version} host=${client.hello.host} pid=${client.hello.pid} lease=${client.hello.lease_ms}ms`)
